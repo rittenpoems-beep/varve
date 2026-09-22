@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""build-search-index.py — 在 turns / traces 上建 FTS5 索引（external content 模式）。
+
+2026-09-23 定稿：**内容与索引分离**
+- 内容权威在普通表 `turns`（对话历史）/ `traces`（全量历史），由 session-digest.py 写入
+- 本脚本只负责索引：`INSERT INTO xxx_fts(xxx_fts) VALUES('rebuild')`
+- external content 模式：索引不重复存文本，内容只存一份
+
+旧结构自动迁移：若 `turns` 仍是 FTS5 虚表（09-23 之前的形态），删表重建，
+随后需重跑 session-digest.py 灌入内容。
+
+用法：python -X utf8 build-search-index.py [--data <dir>] [--stats]
+"""
+import argparse
+import os
+import sqlite3
+
+DEFAULT_DATA = os.environ.get("VARVE_DATA") or os.path.join(os.path.expanduser("~"), ".varve")
+
+TURNS_FTS = ("CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5("
+             "question, answer, content='turns', content_rowid='rowid', tokenize='trigram')")
+TRACES_FTS = ("CREATE VIRTUAL TABLE IF NOT EXISTS traces_fts USING fts5("
+              "text, content='traces', content_rowid='rowid', tokenize='trigram')")
+
+
+def migrate_if_legacy(con):
+    """旧形态（turns 本身是 FTS5 虚表 / 缺 turns 普通表）-> 删掉全部派生结构。"""
+    row = con.execute("SELECT sql FROM sqlite_master WHERE name='turns'").fetchone()
+    legacy = bool(row and row[0] and "fts5" in row[0].lower())
+    if legacy:
+        for t in ("turns", "traces", "turns_fts", "traces_fts"):
+            con.execute("DROP TABLE IF EXISTS " + t)
+        con.commit()
+    return legacy
+
+
+def main():
+    ap = argparse.ArgumentParser(description="建 FTS5 检索索引")
+    ap.add_argument("--data", default=DEFAULT_DATA)
+    ap.add_argument("--stats", action="store_true")
+    ap.add_argument("--force", action="store_true", help="强制重建（忽略变更检测）")
+    args = ap.parse_args()
+
+    db = os.path.join(args.data, "index", "sessions.db")
+    if not os.path.exists(db):
+        print("库不存在：" + db + " —— 先跑 session-digest.py")
+        return 1
+    con = sqlite3.connect(db)
+
+    if migrate_if_legacy(con):
+        print("检测到 09-23 之前的旧结构，已清除 —— 请重跑 session-digest.py 灌入内容")
+        con.close()
+        return 0
+
+    has = con.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='turns'").fetchone()[0]
+    if not has:
+        print("turns 表不存在 —— 先跑 session-digest.py")
+        con.close()
+        return 1
+
+    con.execute(TURNS_FTS)
+    con.execute(TRACES_FTS)
+    con.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
+
+    # 条件 rebuild：内容没变就跳过（避免每次 SessionStart 重建整个索引）
+    if not args.force:
+        last = con.execute("SELECT v FROM meta WHERE k='content_updated_at'").fetchone()
+        built = con.execute("SELECT v FROM meta WHERE k='index_built_at'").fetchone()
+        if last and built and last[0] == built[0]:
+            t0 = con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+            r0 = con.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
+            print("no content changes, skip rebuild (turns=" + str(t0) + " traces=" + str(r0) + ")")
+            con.close()
+            return 0
+
+    con.execute("INSERT INTO turns_fts(turns_fts) VALUES('rebuild')")
+    con.execute("INSERT INTO traces_fts(traces_fts) VALUES('rebuild')")
+    stamp = con.execute("SELECT v FROM meta WHERE k='content_updated_at'").fetchone()
+    if stamp:
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('index_built_at', ?)", (stamp[0],))
+    con.commit()
+
+    t = con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+    r = con.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
+    sz = round(os.path.getsize(db) / 1024.0 / 1024.0, 1)
+    if args.stats:
+        print("turns=" + str(t) + " traces=" + str(r) + " db_mb=" + str(sz) + " path=" + db)
+    else:
+        print("index rebuilt: turns=" + str(t) + " traces=" + str(r) + " db_mb=" + str(sz))
+    con.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
