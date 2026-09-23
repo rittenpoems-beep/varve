@@ -36,19 +36,33 @@ Zero LLM calls. Zero third-party dependencies (Python standard library + PowerSh
 
 ## Compatibility
 
-Varve adapts to two frameworks today, and does not plan to expand:
+### What Varve adapts to
 
-| Framework | State injection | History search | Notes |
+Varve adapts to a **capability contract**, not to a product. A host must provide two things:
+
+| Capability | What it concretely means | What it is used for |
+|---|---|---|
+| **Session events** | Fire a script on session start / resume / clear / compact, passing `cwd`, session id and trigger source | Decide whether this session should receive the state card |
+| **Tail-append injection** | Append text to the context **after the user message** (not rewrite the system prompt) | Deliver the state card without breaking the prompt cache |
+
+The second one is the crux: injection lands at the message tail, the fixed prefix never changes, and the cache stays intact. A host that can only rewrite the prefix cannot support Varve's core value, so we do not support it.
+
+### Which frameworks provide it
+
+| Framework | Session events | Tail-append injection | Status |
 |---|---|---|---|
-| **Codex** | ✅ Adapted · end-to-end tested | ✅ | Primary target |
-| **Claude Code** | ✅ Adapted · verified at script level | ⏳ sample pending | Same scripts; hook contract mirrors Codex |
-| Other frameworks | ❌ Not applicable | ❌ | See positioning below |
+| **Codex** | ✅ `SessionStart` | ✅ `UserPromptSubmit` | Adapted · tested end to end |
+| **Claude Code** | ✅ `SessionStart` | ✅ `UserPromptSubmit` | Adapted · verified at script level |
+| Prefix-only hosts | ✅ | ❌ | Not supported (cache safety impossible) |
+| Hosts without hooks | ❌ | ❌ | Not supported |
 
-### Why only these two
+The two contracts are **nearly identical** — event names, stdin payload fields (`session_id` / `cwd` / `source` / `prompt`) and the injection field (`hookSpecificOutput.additionalContext`) match almost verbatim, and both inject *after* the user message. That is why **the same pair of scripts serves both**; Claude Code only needs an output-format switch (`--json-output`).
 
-Varve targets **heavy agent developers running several projects in parallel** — CLI harness as the main tool, sensitive to token cost, willing to configure hooks. Their tooling converges on Codex and Claude Code.
+**Categories we do not adapt, and why**:
 
-Other categories (IDE-like Cursor / Trae / Qoder, office-like WorkBuddy, library-like LangChain) are not "not done yet" — they are **not applicable**: they have no tail-append injection channel, and Varve's cache-safe design rests on exactly that.
+- IDE-like (Cursor / Trae / Qoder): no tail-append injection channel
+- Office-like (WorkBuddy and similar): same, plus a non-coding use case
+- Library-like (LangChain / CrewAI and similar): no hook concept; the host would have to run the loop itself
 
 ### What each framework needs
 
@@ -61,10 +75,10 @@ Other categories (IDE-like Cursor / Trae / Qoder, office-like WorkBuddy, library
 **Claude Code**
 
 - Requirements: Python 3.10+
-- Install: `pwsh -NoProfile -File scripts\install-claude.ps1` (writes user-level `~/.claude/settings.json`; `-Scope project -Project <dir>` installs per project)
+- Install: `pwsh -NoProfile -File scripts\install-claude.ps1` (writes user-level `~/.claude/settings.json`; `-Scope project -Project <dir>` for a single repo)
 - Manual step: none (settings.json has no trust flow)
-- Limit: `additionalContext` is capped at 10,000 characters (current state card ≈ 2.5k, safe)
-- ⚠️ Status: **state injection** is implemented against the official hook contract and verified with simulated payloads; **history search is not supported yet** — the Claude Code transcript format is unverified, so first run `python -X utf8 scripts\probe-claude-transcript.py` on a machine with Claude Code to sample it
+- Limit: `additionalContext` is capped at 10,000 characters (current state card is about 2.5k, safe)
+- Status: state injection is implemented and verified with simulated payloads; **history search is not supported yet** — the Claude Code transcript format is unverified, so first run `python -X utf8 scripts\probe-claude-transcript.py` on a machine with Claude Code to sample it
 
 ## Quick start
 

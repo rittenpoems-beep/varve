@@ -36,21 +36,35 @@
 
 ## 兼容性
 
-Varve 目前适配两个框架，**不打算再扩**：
+### 适配的是什么
 
-| 框架 | 状态卡注入 | 历史检索 | 说明 |
+Varve 按**能力**适配，不按产品适配。它要求宿主提供两样东西：
+
+| 能力 | 具体是什么 | 用途 |
+|---|---|---|
+| **会话事件** | 会话启动 / 恢复 / 清空 / 压缩时触发一个脚本，脚本能拿到 `cwd`、会话 ID、触发来源 | 判定这个会话该不该注入状态卡 |
+| **尾部追加注入** | 在**用户消息之后**追加一段文本进上下文（不是改系统提示） | 把状态卡送到模型面前，且**不破坏 prompt 缓存** |
+
+第二条是整个设计的命脉：注入落在消息尾部 → 固定前缀不变 → 缓存不碎。只能改前缀的框架，Varve 的核心价值不成立，我们不支持。
+
+### 哪些框架具备
+
+| 框架 | 会话事件 | 尾部追加注入 | 状态 |
 |---|---|---|---|
-| **Codex** | ✅ 已适配 · 端到端实测 | ✅ | 主力目标 |
-| **Claude Code** | ✅ 已适配 · 脚本层验证 | ⏳ 待样本 | 与 Codex 同构，同一对脚本复用 |
-| 其他框架 | ❌ 不适用 | ❌ | 见下方定位说明 |
+| **Codex** | ✅ `SessionStart` | ✅ `UserPromptSubmit` | 已适配 · 端到端实测 |
+| **Claude Code** | ✅ `SessionStart` | ✅ `UserPromptSubmit` | 已适配 · 脚本层验证 |
+| 只有前缀注入的框架 | ✅ | ❌ | 不支持（缓存安全不成立） |
+| 无 hook 通道的框架 | ❌ | ❌ | 不支持 |
 
-### 为什么只做这两家
+两家的 hook 契约**高度一致**——事件名、stdin payload 字段（`session_id` / `cwd` / `source` / `prompt`）、注入字段（`hookSpecificOutput.additionalContext`）几乎逐字相同，注入位置也都是「用户消息之后」。因此跑的是**同一对脚本**，Claude Code 侧只差一个输出形态开关（`--json-output`）。
 
-Varve 的目标用户是**多项目并行的重度 agent 开发者**——把 CLI harness 当主力工具、对 token 成本敏感、愿意配置 hook。这类人的工具选择集中在 Codex 和 Claude Code。
+**未适配的类别与原因**：
 
-其他类别（IDE 类如 Cursor / Trae / Qoder，办公类如 WorkBuddy，库类如 LangChain）不是"暂时没做"，是**不适用**：它们没有"尾部追加注入"这条通道，而 Varve 缓存安全的核心设计正建立在它之上。
+- IDE 类（Cursor / Trae / Qoder）：没有「尾部追加注入」通道
+- 办公类（WorkBuddy 等）：同上，且非编码场景
+- 库类（LangChain / CrewAI 等）：没有 hook 概念，需要宿主自己实现循环
 
-### 各框架需要什么
+### 各框架要准备什么
 
 **Codex**
 
@@ -61,10 +75,10 @@ Varve 的目标用户是**多项目并行的重度 agent 开发者**——把 CL
 **Claude Code**
 
 - 依赖：Python 3.10+
-- 安装：`pwsh -NoProfile -File scripts\install-claude.ps1`（默认写用户级 `~/.claude/settings.json`；`-Scope project -Project <目录>` 装到项目级）
+- 安装：`pwsh -NoProfile -File scripts\install-claude.ps1`（默认用户级 `~/.claude/settings.json`；`-Scope project -Project <目录>` 装到单项目）
 - 手动步骤：无（settings.json 不需要信任流程）
 - 上限：`additionalContext` 10,000 字符（当前状态卡约 2.5k，安全）
-- ⚠️ 现状：**状态卡注入**已实现（按官方 hook 契约 + 模拟 payload 验证）；**历史检索暂不支持**——Claude Code 的 transcript 格式未验证，先在有 Claude Code 的机器上跑 `python -X utf8 scripts\probe-claude-transcript.py` 采样，再据此补索引适配
+- ⚠️ 现状：状态卡注入已实现并用模拟 payload 验证；**历史检索暂不支持**——Claude Code 的 transcript 格式未验证，先在有 Claude Code 的机器上跑 `python -X utf8 scripts\probe-claude-transcript.py` 采样，再据此补索引适配
 
 ## 快速开始（3 步）
 
