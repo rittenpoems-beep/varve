@@ -22,9 +22,36 @@ import sqlite3
 DEFAULT_DATA = os.environ.get("VARVE_DATA") or os.path.join(os.path.expanduser("~"), ".varve")
 
 TURNS_FTS = ("CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5("
-             "question, answer, content='turns', content_rowid='rowid', tokenize='trigram')")
+             "question, answer, content='turns', content_rowid='id', tokenize='trigram')")
 TRACES_FTS = ("CREATE VIRTUAL TABLE IF NOT EXISTS traces_fts USING fts5("
-              "text, content='traces', content_rowid='rowid', tokenize='trigram')")
+              "text, content='traces', content_rowid='id', tokenize='trigram')")
+
+# schema 2（2026-09-24）：触发器让 FTS 与内容表**始终同步** ——
+# 不再依赖"digest 之后必须 rebuild"的时序，彻底消除索引陈旧窗口（盲测 #5 彻底修法）。
+SYNC_TRIGGERS = [
+    """CREATE TRIGGER IF NOT EXISTS turns_ai AFTER INSERT ON turns BEGIN
+         INSERT INTO turns_fts(rowid, question, answer) VALUES (new.id, new.question, new.answer);
+       END""",
+    """CREATE TRIGGER IF NOT EXISTS turns_ad AFTER DELETE ON turns BEGIN
+         INSERT INTO turns_fts(turns_fts, rowid, question, answer)
+         VALUES ('delete', old.id, old.question, old.answer);
+       END""",
+    """CREATE TRIGGER IF NOT EXISTS turns_au AFTER UPDATE ON turns BEGIN
+         INSERT INTO turns_fts(turns_fts, rowid, question, answer)
+         VALUES ('delete', old.id, old.question, old.answer);
+         INSERT INTO turns_fts(rowid, question, answer) VALUES (new.id, new.question, new.answer);
+       END""",
+    """CREATE TRIGGER IF NOT EXISTS traces_ai AFTER INSERT ON traces BEGIN
+         INSERT INTO traces_fts(rowid, text) VALUES (new.id, new.text);
+       END""",
+    """CREATE TRIGGER IF NOT EXISTS traces_ad AFTER DELETE ON traces BEGIN
+         INSERT INTO traces_fts(traces_fts, rowid, text) VALUES ('delete', old.id, old.text);
+       END""",
+    """CREATE TRIGGER IF NOT EXISTS traces_au AFTER UPDATE ON traces BEGIN
+         INSERT INTO traces_fts(traces_fts, rowid, text) VALUES ('delete', old.id, old.text);
+         INSERT INTO traces_fts(rowid, text) VALUES (new.id, new.text);
+       END""",
+]
 
 
 def migrate_if_legacy(con):
@@ -91,9 +118,19 @@ def main():
         con.close()
         return 1
 
+    # schema 2 检查：旧结构（无 id 主键）必须先由 session-digest.py 升级并重灌
+    cols = [r[1] for r in con.execute("PRAGMA table_info(turns)").fetchall()]
+    if "id" not in cols:
+        print("检测到 schema 1（turns 无 id 主键）—— 先跑 session-digest.py 完成结构升级并重灌")
+        con.close()
+        return 1
+
     con.execute(TURNS_FTS)
     con.execute(TRACES_FTS)
     con.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
+    for trig in SYNC_TRIGGERS:
+        con.execute(trig)
+    con.commit()
 
     # 条件 rebuild：内容没变就跳过（避免每次 SessionStart 重建整个索引）
     if not args.force:
@@ -116,7 +153,8 @@ def main():
     t = con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
     r = con.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
     sz = round(os.path.getsize(db) / 1024.0 / 1024.0, 1)
-    print("index rebuilt: turns=" + str(t) + " traces=" + str(r) + " db_mb=" + str(sz))
+    print("index rebuilt: turns=" + str(t) + " traces=" + str(r) + " db_mb=" + str(sz)
+          + " | 同步触发器已就位（后续写入自动进索引）")
     con.close()
     return 0
 

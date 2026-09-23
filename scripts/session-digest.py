@@ -29,18 +29,86 @@ Q_LIMIT = 1500      # 单条提问上限
 A_LIMIT = 3000      # 单条回答上限
 TRACE_LIMIT = 1500  # 单条轨迹文本上限
 
+# schema 3（2026-09-24）：稳定 id 改由 id_map 顺序分配 ——
+# 修 rowid 复用错位（盲测 #5），同时避免大整数 rowid 撑爆 trigram 索引
+SCHEMA_VERSION = 3
+
 SCHEMA = [
     """CREATE TABLE IF NOT EXISTS turns (
+        id INTEGER PRIMARY KEY,
         session_id TEXT, workspace TEXT, date TEXT, turn_no INTEGER,
         src_line_start INTEGER, src_line_end INTEGER, source TEXT,
         question TEXT, answer TEXT,
-        PRIMARY KEY (source, turn_no))""",
+        UNIQUE(source, turn_no))""",
     """CREATE TABLE IF NOT EXISTS traces (
+        id INTEGER PRIMARY KEY,
         session_id TEXT, seq INTEGER, kind TEXT, text TEXT, src_line INTEGER, source TEXT,
-        PRIMARY KEY (source, seq))""",
+        UNIQUE(source, seq))""",
     """CREATE TABLE IF NOT EXISTS file_state (
         rel TEXT PRIMARY KEY, mtime INTEGER, size INTEGER)""",
+    """CREATE TABLE IF NOT EXISTS id_map (
+        kind TEXT, source TEXT, no INTEGER, id INTEGER PRIMARY KEY,
+        UNIQUE(kind, source, no))""",
+    """CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)""",
 ]
+
+
+class IdAllocator:
+    """顺序分配的稳定 id：同一 (kind, source, no) 永远拿到同一个 id。
+
+    为什么不用哈希 id（v2 试过）：FTS5 的 rowid 会写进每一条索引项，63-bit 随机值
+    让 trigram 索引从 ~75MB 涨到 ~145MB。顺序小整数既稳定（不错位）又不膨胀。
+    id 只增不减，删除内容行也不会让 id 被复用。
+    """
+
+    def __init__(self, con):
+        self.con = con
+        self.cache = {}
+        self.next = 1
+        for kind, src, no, i in con.execute("SELECT kind, source, no, id FROM id_map"):
+            self.cache[(kind, src, no)] = i
+            if i >= self.next:
+                self.next = i + 1
+        self.pending = []
+
+    def get(self, kind, source, no):
+        key = (kind, source, no)
+        v = self.cache.get(key)
+        if v is None:
+            v = self.next
+            self.next += 1
+            self.cache[key] = v
+            self.pending.append((kind, source, no, v))
+        return v
+
+    def flush(self):
+        if self.pending:
+            self.con.executemany("INSERT OR IGNORE INTO id_map VALUES (?,?,?,?)", self.pending)
+            self.pending = []
+
+
+def ensure_schema(con):
+    """建表 + schema 版本迁移。返回 True 表示结构升级过、需要全量重灌。"""
+    con.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
+    row = con.execute("SELECT v FROM meta WHERE k='schema_version'").fetchone()
+    ver = int(row[0]) if row and str(row[0]).isdigit() else 0
+    # 结构探测优先于版本号：老库没有 schema_version 记录（或被误写），只看版本会漏掉升级
+    cols = [r[1] for r in con.execute("PRAGMA table_info(turns)").fetchall()]
+    has_idmap = con.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='id_map'").fetchone()[0]
+    # 缺 id 列（v1）或缺 id_map（v2 哈希 id）都要升级
+    stale = bool(cols) and ("id" not in cols or not has_idmap)
+    if stale or (ver and ver < SCHEMA_VERSION):
+        # 内容全部可从 sessions/*.jsonl 重建（可重建原则），结构升级直接重灌
+        for t in ("turns", "traces", "turns_fts", "traces_fts", "file_state", "id_map"):
+            con.execute("DROP TABLE IF EXISTS " + t)
+        for t in ("turns_ai", "turns_ad", "turns_au", "traces_ai", "traces_ad", "traces_au"):
+            con.execute("DROP TRIGGER IF EXISTS " + t)
+        ver = 0
+    for stmt in SCHEMA:
+        con.execute(stmt)
+    if ver < SCHEMA_VERSION:
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+    return stale
 
 
 def strip_harness(text):
@@ -141,9 +209,13 @@ def main():
     # WAL 让读写不互斥；busy_timeout 遇锁等待而不是立刻抛 "database is locked"。
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA busy_timeout=30000")
-    for stmt in SCHEMA:
-        con.execute(stmt)
+    upgraded = ensure_schema(con)
+    if upgraded:
+        args.full = True          # 结构升级 -> 必须全量重灌（内容可从 jsonl 重建）
+        print("schema 升级到 v" + str(SCHEMA_VERSION) + "：全量重建内容")
     con.commit()
+
+    alloc = IdAllocator(con)
 
     all_files = sorted(glob.glob(os.path.join(args.sessions, "**", "*.jsonl"), recursive=True))
     files = all_files[-args.limit:] if args.limit else all_files
@@ -182,11 +254,16 @@ def main():
             # 跨 source 去重（盲测 #6）：resume 会话会产生内容重叠的多个 rollout，
             # 同一 (session_id, turn_no) 只保留最后写入的一份，避免 BM25 统计被稀释。
             con.execute("DELETE FROM turns WHERE session_id=? AND turn_no=?", (sid, no))
-            con.execute("INSERT INTO turns VALUES (?,?,?,?,?,?,?,?,?)",
-                        (sid, rec["cwd"], date, no, ls, le, rel, q, a))
+            con.execute("INSERT OR REPLACE INTO turns "
+                        "(id, session_id, workspace, date, turn_no, src_line_start, src_line_end, source, question, answer) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (alloc.get("turn", rel, no), sid, rec["cwd"], date, no, ls, le, rel, q, a))
         for seq, kind, txt, ln in rec["traces"]:
-            con.execute("INSERT INTO traces VALUES (?,?,?,?,?,?)", (sid, seq, kind, txt, ln, rel))
+            con.execute("INSERT OR REPLACE INTO traces "
+                        "(id, session_id, seq, kind, text, src_line, source) VALUES (?,?,?,?,?,?,?)",
+                        (alloc.get("trace", rel, seq), sid, seq, kind, txt, ln, rel))
         con.execute("INSERT OR REPLACE INTO file_state VALUES (?,?,?)", (rel, mtime, size))
+        alloc.flush()
         con.commit()
         written += 1
         n_turns += len(rec["turns"])
@@ -205,6 +282,14 @@ def main():
     if written or orphans:
         con.execute("INSERT OR REPLACE INTO meta VALUES ('content_updated_at', datetime('now'))")
     con.commit()
+
+    if upgraded:
+        # 结构升级会留下大量空闲页（DROP 不缩文件）；升级后回收一次，避免体积虚高
+        try:
+            con.execute("VACUUM")
+            print("已 VACUUM 回收碎片")
+        except sqlite3.OperationalError:
+            pass
 
     t = con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
     r = con.execute("SELECT COUNT(*) FROM traces").fetchone()[0]

@@ -65,6 +65,30 @@ def contract_hint():
     )
 
 
+def init_hint():
+    """安装后的**首次**注入：请 LLM 回问一句 L1 补充（只出现一次）。
+
+    L1 的自动扫描区由 env-scan.py 生成，但网络拦截、策略禁用、机器特约这类
+    信息机器探不到——首次会话时让模型主动问一句，补进 ENVIRONMENT.md。
+    用标记文件保证只提示一次（不是每会话）。
+    """
+    flag = os.path.join(DATA_ROOT, "pending", ".init_prompted")
+    if os.path.exists(flag):
+        return ""
+    try:
+        os.makedirs(os.path.dirname(flag), exist_ok=True)
+        with open(flag, "w", encoding="utf-8") as fh:
+            fh.write(time.strftime("%Y-%m-%d %H:%M") + "\n")
+    except Exception:
+        return ""
+    return (
+        "\n[Varve 初始化 · 一次性]\n"
+        "环境已自动扫描进 " + os.path.join(DATA_ROOT, "ENVIRONMENT.md") + " 的 AUTO-SCAN 区（OS / 运行时 / 工具链 / DB 能力 / 路径）。\n"
+        "请**主动向用户回问一句**：还有哪些机器探不到的约束？（例：某域名被代理拦、某命令被策略禁、特定机器的账号/路径约定）\n"
+        "用户补充后写进该文件的非自动区；没有补充就跳过，此后不再提示。\n"
+    )
+
+
 def staging_hint():
     """staging 有未合并提案时给一行提示。"""
     try:
