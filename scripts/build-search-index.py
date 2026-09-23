@@ -11,6 +11,9 @@
 随后需重跑 session-digest.py 灌入内容。
 
 用法：python -X utf8 build-search-index.py [--data <dir>] [--stats]
+
+`--stats` 是**只读契约**（doctor.ps1 体检依赖它）：只读连接取计数，
+不迁移、不建表、不 rebuild。
 """
 import argparse
 import os
@@ -46,7 +49,36 @@ def main():
     if not os.path.exists(db):
         print("库不存在：" + db + " —— 先跑 session-digest.py")
         return 1
-    con = sqlite3.connect(db)
+
+    # --stats 只读：修 2026-09-23 盲测发现（doctor.ps1 承诺只读，实际会触发 rebuild 写库）
+    if args.stats:
+        try:
+            con = sqlite3.connect("file:" + db.replace("\\", "/") + "?mode=ro", uri=True)
+        except sqlite3.Error as e:
+            print("stats 无法打开库: " + str(e))
+            return 1
+        con.execute("PRAGMA busy_timeout=10000")
+        try:
+            t = con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+            r = con.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
+        except sqlite3.OperationalError as e:
+            msg = str(e)
+            if "readonly" in msg.lower() or "locked" in msg.lower():
+                print("stats 只读失败（库需要崩溃恢复，如 hot journal；跑一次 session-digest.py 可复位）: " + msg)
+            else:
+                print("turns/traces 表不存在 —— 先跑 session-digest.py (" + msg + ")")
+            con.close()
+            return 1
+        sz = round(os.path.getsize(db) / 1024.0 / 1024.0, 1)
+        print("turns=" + str(t) + " traces=" + str(r) + " db_mb=" + str(sz) + " path=" + db)
+        con.close()
+        return 0
+
+    con = sqlite3.connect(db, timeout=30)
+    # 并发与崩溃健壮性（2026-09-23 盲测 #4）：WAL + busy_timeout，避免 rebuild 期间
+    # 被读请求撞上 "database is locked"，或被中断后留下 hot journal 阻塞只读访问。
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=30000")
 
     if migrate_if_legacy(con):
         print("检测到 09-23 之前的旧结构，已清除 —— 请重跑 session-digest.py 灌入内容")
@@ -84,10 +116,7 @@ def main():
     t = con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
     r = con.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
     sz = round(os.path.getsize(db) / 1024.0 / 1024.0, 1)
-    if args.stats:
-        print("turns=" + str(t) + " traces=" + str(r) + " db_mb=" + str(sz) + " path=" + db)
-    else:
-        print("index rebuilt: turns=" + str(t) + " traces=" + str(r) + " db_mb=" + str(sz))
+    print("index rebuilt: turns=" + str(t) + " traces=" + str(r) + " db_mb=" + str(sz))
     con.close()
     return 0
 

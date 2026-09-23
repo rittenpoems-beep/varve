@@ -136,20 +136,24 @@ def main():
     idx = os.path.join(args.data, "index")
     os.makedirs(idx, exist_ok=True)
     db = os.path.join(idx, "sessions.db")
-    con = sqlite3.connect(db)
+    con = sqlite3.connect(db, timeout=30)
+    # 并发与崩溃健壮性（2026-09-23 盲测 #4 / 深夜 hot journal 实况）：
+    # WAL 让读写不互斥；busy_timeout 遇锁等待而不是立刻抛 "database is locked"。
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=30000")
     for stmt in SCHEMA:
         con.execute(stmt)
     con.commit()
 
-    files = sorted(glob.glob(os.path.join(args.sessions, "**", "*.jsonl"), recursive=True))
-    if args.limit:
-        files = files[-args.limit:]
+    all_files = sorted(glob.glob(os.path.join(args.sessions, "**", "*.jsonl"), recursive=True))
+    files = all_files[-args.limit:] if args.limit else all_files
 
     written = skipped = empty = 0
     n_turns = n_traces = 0
-    existing = set()
-    for p in files:
-        existing.add(os.path.relpath(p, args.sessions).replace("\\", "/"))
+    # 孤儿清理的基准必须是**完整**文件列表。若用 --limit 截断后的列表做基准，
+    # 本轮未参与的文件会被误判为"源已删除"，其 turns/traces 被整段清空
+    # （数据破坏；2026-09-23 盲测复现：3 条 turns 跑 --limit 1 后只剩 2 条）。
+    existing = {os.path.relpath(p, args.sessions).replace("\\", "/") for p in all_files}
     for p in files:
         rel = os.path.relpath(p, args.sessions).replace("\\", "/")
         try:

@@ -27,8 +27,45 @@ RRF_K = 60
 
 
 def fts_quote(v):
-    """FTS5 短语化：内部双引号按 FTS5 规则转义（不改写用户输入）。"""
-    return '"' + v.replace('"', '""') + '"'
+    """把自然语言查询转成 FTS5 表达式：多词 → 各自成短语、按 OR 连接。
+
+    背景（2026-09-23 盲测复现）：trigram 分词下，把 "compact pending" 整串包成
+    单个短语，等于要求原文里字面连续出现该串，命中率从 100% 掉到 0% —— 而且是
+    **静默** 0 条（看起来像"历史上没这回事"）。拆词 + OR 才符合"回忆关键词"的直觉。
+
+    需要精确短语或原生 FTS5 语法时走 --raw（例如：--raw '"并发 裁决"'）。
+    """
+    parts = [p for p in v.split() if p]
+
+    def esc(s):
+        return '"' + s.replace('"', '""') + '"'
+
+    if not parts:
+        return '""'
+    if len(parts) == 1:
+        return esc(parts[0])
+    return " OR ".join(esc(p) for p in parts)
+
+
+def connect_db(db):
+    """打开记忆库：优先只读，失败时降级为可写连接。
+
+    降级场景（2026-09-23 实遇）：库处于 hot journal 状态时（上次写入被杀），
+    SQLite 必须拿到写权限才能完成崩溃恢复，纯 mode=ro 会直接报
+    "attempt to write a readonly database" —— 此时若不复位，检索会整体不可用。
+    本函数返回的连接只用于 SELECT，降级不会修改数据。
+    """
+    uri = "file:" + db.replace("\\", "/") + "?mode=ro"
+    try:
+        con = sqlite3.connect(uri, uri=True, timeout=10)
+        con.execute("PRAGMA busy_timeout=10000")
+        con.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()   # 触碰一次，暴露 hot journal
+        return con
+    except sqlite3.OperationalError as e:
+        print("note: 只读打开失败（" + str(e) + "），降级为可写连接读取", file=sys.stderr)
+        con = sqlite3.connect(db, timeout=30)
+        con.execute("PRAGMA busy_timeout=30000")
+        return con
 
 
 # ---------- 粗记录（records 漏斗第一级）----------
@@ -62,6 +99,8 @@ def run_variant(con, variant, workspace, since, raw, limit=200):
     """返回 [(sid, ws, date, turn, ls, le, source, score, snip)]。"""
     if len(variant) < 3:                      # 短词（多为中文双字）-> 字面兜底
         return run_like(con, variant, workspace, since, limit)
+    if not raw and re.search(r"\b(AND|OR|NOT|NEAR)\b", variant):
+        print("warn: 查询含 FTS5 语法关键词但未加 --raw，已按普通词拆分处理: " + variant, file=sys.stderr)
     q = variant if raw else fts_quote(variant)
     sql = ("SELECT t.session_id, t.workspace, t.date, t.turn_no, t.src_line_start, t.src_line_end, "
            "t.source, bm25(turns_fts, 5.0, 1.0) AS s, "
@@ -85,6 +124,12 @@ def run_variant(con, variant, workspace, since, raw, limit=200):
 
 
 def run_like(con, term, workspace, since, limit):
+    """短词（<3 字符，多为中文双字）字面兜底。
+
+    该路径无相关性打分（score 固定 -2.0），排序按新近度 —— 盲测显示：目标几乎
+    都在候选集里，丢的只是排序（"请求"83 行、"技能"35 行，默认 limit=5 全 MISS）。
+    更贴合的做法是按命中位置/次数打分，先以最小改动（新近度）兜住可用性。
+    """
     sql = ("SELECT session_id, workspace, date, turn_no, src_line_start, src_line_end, source, "
            "-2.0 AS s, "
            "substr(COALESCE(question,'') || ' ' || COALESCE(answer,''), "
@@ -97,7 +142,7 @@ def run_like(con, term, workspace, since, limit):
     if since:
         sql += " AND (date = '' OR date >= ?)"
         params.append(since)
-    sql += " LIMIT ?"
+    sql += " ORDER BY (date IS NULL OR date = '') ASC, date DESC, turn_no DESC LIMIT ?"
     params.append(limit)
     try:
         return con.execute(sql, params).fetchall()
@@ -186,7 +231,7 @@ def main():
         print("库不存在：" + db + " —— 先跑 session-digest.py + build-search-index.py")
         return 2
     sid_filter = since_to_date(args.since)
-    con = sqlite3.connect("file:" + db.replace("\\", "/") + "?mode=ro", uri=True)
+    con = connect_db(db)
     t0 = time.time()
 
     if args.stats:

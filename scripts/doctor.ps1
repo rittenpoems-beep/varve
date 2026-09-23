@@ -26,7 +26,7 @@ if ($py) {
 
 # 2. 数据目录
 Chk "数据目录存在" (Test-Path -LiteralPath $DataRoot) $DataRoot
-foreach ($d in @("index", "records", "digest")) {
+foreach ($d in @("index", "records")) {
     Chk ("  子目录 " + $d) (Test-Path -LiteralPath (Join-Path $DataRoot $d)) ""
 }
 
@@ -40,25 +40,23 @@ $projAbs = [System.IO.Path]::GetFullPath($Project)
 $hooks = Join-Path $projAbs ".codex\hooks.json"
 Chk "hooks.json 已安装" (Test-Path -LiteralPath $hooks) $hooks
 
-# 5. 索引状态
-$digestDir = Join-Path $DataRoot "digest"
-if (Test-Path -LiteralPath $digestDir) {
-    $dc = (Get-ChildItem $digestDir -Recurse -Filter *.md -ErrorAction SilentlyContinue).Count
-    Chk "对话层 digest" ($dc -gt 0) ("$dc 个文件")
-}
+# 5. 索引状态（--stats 走只读路径，不会触发 rebuild）
 $db = Join-Path $DataRoot "index\sessions.db"
 if (Test-Path -LiteralPath $db) {
     $sz = [math]::Round((Get-Item $db).Length / 1MB, 1)
-    $line = (& python -X utf8 (Join-Path $PSScriptRoot "build-search-index.py") --stats --data $DataRoot) 2>$null
-    Chk "检索索引" $true ($sz.ToString() + " MB | " + $line)
+    $line = ((& python -X utf8 (Join-Path $PSScriptRoot "build-search-index.py") --stats --data $DataRoot 2>&1) -join " ")
+    $okIdx = ($LASTEXITCODE -eq 0) -and ($line -match "turns=")
+    Chk "检索索引" $okIdx ($sz.ToString() + " MB | " + $line)
 } else {
     Chk "检索索引" $false "未建立（跑 build-search-index.py）"
 }
 
-# 6. AGENTS 契约
+# 6. 检索契约（Skill 优先；AGENTS.md 规则句为可选双保险）
+$skillMd = Join-Path $env:USERPROFILE ".codex\skills\varve-memory\SKILL.md"
 $ag = Join-Path $env:USERPROFILE ".codex\AGENTS.md"
-$has = if (Test-Path -LiteralPath $ag) { [bool](Select-String -Path $ag -Pattern "recall.py" -SimpleMatch -Quiet) } else { $false }
-Chk "AGENTS.md 含检索契约" $has $(if ($has) { "已配置" } else { "缺规则句 —— 跑 install.ps1 或手动追加 templates\agents-snippet.md" })
+$hasSkill = Test-Path -LiteralPath $skillMd
+$hasAgents = if (Test-Path -LiteralPath $ag) { [bool](Select-String -Path $ag -Pattern "recall.py" -SimpleMatch -Quiet) } else { $false }
+Chk "检索契约" ($hasSkill -or $hasAgents) $(if ($hasSkill) { "Skill 已装" } elseif ($hasAgents) { "AGENTS.md 规则句" } else { "缺 —— 跑 install.ps1" })
 
 # 输出
 Write-Output ""

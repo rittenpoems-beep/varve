@@ -1,16 +1,18 @@
 <#
 install.ps1 — Varve 安装器：让一个陌生用户从零到"记忆自动生效"。
 
-做四件事：
-  1. 环境检查（Python 3.12+ / SQLite FTS5+trigram / PowerShell 7+）
+做五件事：
+  1. 环境检查（Python 3.10+ / SQLite FTS5+trigram / PowerShell 7+）
   2. 创建数据目录（默认 %USERPROFILE%\.varve；-DataRoot 可覆盖）
   3. 生成 .codex/hooks.json（用本机 Python 路径 + 当前安装路径，写入目标项目）
-  4. 输出 AGENTS.md 规则句（打印；-AppendAgents 可自动追加到用户 AGENTS.md）
+  4. 安装 Skill（templates\skill-varve-memory.md -> ~/.codex/skills/varve-memory）
+  5. 输出 AGENTS.md 规则句（打印；-AppendAgents 可自动追加到用户 AGENTS.md）
 
 用法：
   pwsh -NoProfile -File scripts\install.ps1 -Project D:\my-project
   pwsh -NoProfile -File scripts\install.ps1 -Project . -DataRoot D:\varve-data -AppendAgents
 
+退出码：0 = 全部检查通过；1 = 存在 [FAIL] 项（供 CI / 自动化感知，2026-09-23 修）。
 装完后唯一的手动步骤：在 Codex UI 里点一次 hooks 信任（New hook - review required）。
 #>
 param(
@@ -30,7 +32,7 @@ function Warn($msg) { Write-Output ("  [WARN] " + $msg) }
 function Bad($msg)  { Write-Output ("  [FAIL] " + $msg); $script:ok = $false }
 
 # ---------- 1. 环境检查 ----------
-Step "1/4 环境检查"
+Step "1/5 环境检查"
 
 $py = (Get-Command python -ErrorAction SilentlyContinue)
 if ($py) {
@@ -47,11 +49,11 @@ if ($PSVersionTable.PSVersion.Major -ge 7) { Good ("PowerShell " + $PSVersionTab
 else { Warn "建议 PowerShell 7+（pwsh）" }
 
 # ---------- 2. 数据目录 ----------
-Step "2/4 数据目录"
+Step "2/5 数据目录"
 
 if (-not $DataRoot) { $DataRoot = Join-Path $env:USERPROFILE ".varve" }
 $DataRoot = [System.IO.Path]::GetFullPath($DataRoot)
-foreach ($d in @("", "index", "records", "digest", "staging")) {
+foreach ($d in @("", "index", "records", "staging")) {
     $p = if ($d) { Join-Path $DataRoot $d } else { $DataRoot }
     if (-not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p | Out-Null }
 }
@@ -59,7 +61,7 @@ Good ("数据目录: " + $DataRoot)
 Warn ("其他脚本要找到它，请设置环境变量：`$env:VARVE_DATA = `"" + $DataRoot + "`"（可在系统设置里持久化）")
 
 # ---------- 3. hooks.json ----------
-Step "3/4 hooks.json"
+Step "3/5 hooks.json"
 
 $projAbs = [System.IO.Path]::GetFullPath($Project)
 if (-not (Test-Path -LiteralPath $projAbs)) { Bad ("目标项目不存在: " + $projAbs); exit 1 }
@@ -156,6 +158,8 @@ Write-Output ""
 if ($ok) {
     Write-Output "== 安装完成。最后一步（无法自动化）：在 Codex 里打开任意会话，按提示点一次 hooks 信任。"
     Write-Output "   验证：开一个新会话，看到「工程状态」注入即生效；或跑 doctor.ps1。"
+    exit 0
 } else {
     Write-Output "== 安装未完成：请先解决上面 [FAIL] 项。"
+    exit 1
 }

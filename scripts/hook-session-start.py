@@ -3,8 +3,9 @@
 """hook-session-start.py — SessionStart：**只做判定与标记**，不注入（保缓存安全）。
 
 2026-09-23 定稿（判定与注入拆开，用户拍板）：
-- startup / resume / clear → 写 pending 标记；真正的注入由 UserPromptSubmit **追加**完成
-- compact → **例外**：直接注入。压缩后的 continuation 不会再触发 UPS，注入必须即时
+- startup / resume / clear / compact → 统一只写 pending 标记；真正的注入由
+  UserPromptSubmit **追加**在请求尾部完成（永不触碰固定前缀）
+- 原「compact 例外：直接注入」已于 2026-09-23 取消（下方正文同此，docstring 曾滞后于实现）
 - staging 待裁决提示并入 pending，随 L2 状态一起在 UPS 时给出
 
 任何异常静默退出（绝不影响会话启动）。
