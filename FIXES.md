@@ -1,5 +1,9 @@
 # 已修复清单（回归 / 压测对照用）
 
+> **English note**: this document is written in Chinese. It is a regression ledger — each entry lists the
+> problem, the fix, and a minimal "how to check for regression" recipe. For a project overview, see
+> [README.en.md](README.en.md). The only non-Chinese content is this note.
+
 > **用途**：其他 Agent（本地 / 云端）对本系统做压力测试时，逐条对照检查**是否复发**。
 > 约定：每条给出最小的复发检查方式；全量体检跑 `python -X utf8 scripts/audit.py`，应为 `RESULT=PASS`。
 > 来源标注：**[盲测]** = 2026-09-23 纯盲 Agent 交叉验证发现；**[自检]** = 本仓库 audit.py 发现；**[实况]** = 真实故障。

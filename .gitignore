@@ -2,3 +2,20 @@ __pycache__/
 *.pyc
 *.log
 tmp/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 在目标项目内运行 install.ps1 会生成
+.codex/
+
+# SQLite WAL 侧文件
+*.db-wal
+*.db-shm
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

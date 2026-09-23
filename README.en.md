@@ -1,5 +1,7 @@
 # Varve
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **English** | [简体中文](README.md)
 
 **A cross-session memory layer for AI coding agents** (Codex first, framework-agnostic by design) — three tiers (environment / state / history), **append-only injection** that never breaks the prompt cache, **SQLite full-text search**, and a **single global state card** shared across workspaces.
@@ -8,7 +10,18 @@ Zero LLM calls. Zero third-party dependencies (Python standard library + PowerSh
 
 > The name comes from geology: a **varve** is an annual sediment layer in a glacial lake — one layer per year, stacked, never rewritten, traceable back to any layer. That is exactly its three principles: **append-only, rebuildable, addressable**.
 
-> Status: early but usable (v0.1). In daily use on a real project; the index layer ships with an audit tool and regression cases (see [FIXES.md](FIXES.md)).
+> Status: early but usable (v0.1). In daily use on a real project; the index layer ships with an audit tool and regression cases (see [FIXES.md](FIXES.md), in Chinese).
+
+## Contents
+
+- [What it solves](#what-it-solves)
+- [Quick start](#quick-start)
+- [Tools](#tools)
+- [How it works](#how-it-works)
+- [Data & privacy](#data--privacy)
+- [Known limitations](#known-limitations)
+- [Feedback & contributing](#feedback--contributing)
+- [License](#license)
 
 ## What it solves
 
@@ -29,7 +42,7 @@ Zero LLM calls. Zero third-party dependencies (Python standard library + PowerSh
 # 1. Install: env check -> data dir -> generate .codex/hooks.json -> install Skill
 pwsh -NoProfile -File scripts\install.ps1 -Project D:\your-project
 
-# 2. Approve the hooks once in Codex (the only manual step)
+# 2. Approve the hooks once in Codex ("New hook - review required", the only manual step)
 
 # 3. Verify (13 checks)
 pwsh -NoProfile -File scripts\doctor.ps1 -Project D:\your-project
@@ -49,7 +62,7 @@ python -X utf8 scripts\recall.py "error text" --deep     # include tool-call/out
 
 ## Tools
 
-| Script | Role |
+| Content | Description |
 |---|---|
 | `install.ps1` | Install: env check / data dir / hooks.json / Skill (idempotent) |
 | `doctor.ps1` | 13-point health check (read-only) |
@@ -66,11 +79,13 @@ python -X utf8 scripts\recall.py "error text" --deep     # include tool-call/out
 | `init.ps1` / `sync-projects.ps1` / `build-docs-index.ps1` | Init / workspace discovery / docs index |
 | `staging/` | Concurrent writes: proposal -> arbitration -> atomic commit (incl. stress test) |
 | `templates/` | State card / record / Skill / AGENTS snippets |
-| `FIXES.md` | Fixed-issue ledger, each entry with a "how to check for regression" recipe |
+| `FIXES.md` | Fixed-issue ledger (in Chinese), each entry with a "how to check for regression" recipe |
+
+> Naming: executable scripts use hyphens (`hook-user-prompt.py`); importable Python modules use underscores (`varve_hooks_common.py`).
 
 ## How it works
 
-```
+```text
 Session logs (read-only)
    |  triggered by SessionStart
    v
@@ -109,8 +124,8 @@ Three-stage funnel: records -> conversation history -> trace layer
 ## Feedback & contributing
 
 - Bug reports: please attach the output of `python -X utf8 scripts/audit.py` — most issues can be localized from it.
-- When submitting a fix, please update [FIXES.md](FIXES.md) as well (problem / fix / regression check).
-- Known issues and fix history live in [FIXES.md](FIXES.md); design documents are not part of this repository (public release contains the artifact only).
+- When submitting a fix, please update [FIXES.md](FIXES.md) as well (problem / fix / regression check; the file is in Chinese).
+- Known issues and fix history live in [FIXES.md](FIXES.md) (in Chinese); design documents are not part of this repository (public release contains the artifact only).
 
 ## License
 
