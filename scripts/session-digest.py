@@ -179,6 +179,9 @@ def main():
         con.execute("DELETE FROM turns WHERE source=?", (rel,))
         con.execute("DELETE FROM traces WHERE source=?", (rel,))
         for no, (ls, le, q, a) in enumerate(rec["turns"], 1):
+            # 跨 source 去重（盲测 #6）：resume 会话会产生内容重叠的多个 rollout，
+            # 同一 (session_id, turn_no) 只保留最后写入的一份，避免 BM25 统计被稀释。
+            con.execute("DELETE FROM turns WHERE session_id=? AND turn_no=?", (sid, no))
             con.execute("INSERT INTO turns VALUES (?,?,?,?,?,?,?,?,?)",
                         (sid, rec["cwd"], date, no, ls, le, rel, q, a))
         for seq, kind, txt, ln in rec["traces"]:

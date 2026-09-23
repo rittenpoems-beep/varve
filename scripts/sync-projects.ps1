@@ -31,8 +31,12 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
 $lines = Get-Content -LiteralPath $ConfigPath -Encoding UTF8
 $paths = @()
 foreach ($l in $lines) {
-    $m = [regex]::Match($l, "^\[projects\.'([^']+)'\]")
-    if ($m.Success) { $paths += $m.Groups[1].Value }
+    # 兼容单/双引号（盲测 #8：只认单引号会静默漏掉工作区）
+    $m = [regex]::Match($l, '^\[projects\.(.+)\]$')
+    if ($m.Success) {
+        $p = $m.Groups[1].Value.Trim("'", '"')
+        if ($p) { $paths += $p }
+    }
 }
 $paths = $paths | Sort-Object -Unique
 

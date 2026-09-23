@@ -11,27 +11,22 @@ import time
 
 DATA_ROOT = os.environ.get("VARVE_DATA") or os.path.join(os.path.expanduser("~"), ".varve")
 PENDING_DIR = os.path.join(DATA_ROOT, "pending")
+GLOBAL_STATUS = os.path.join(DATA_ROOT, "STATUS.md")
 LIMIT = 3500
 SECTION_RE = re.compile(r"<!-- =+ 工程状态区.*?<!-- =+ 工程状态区 结束.*?-->", re.DOTALL)
 
 
-def find_status(cwd):
-    d = cwd or ""
-    for _ in range(6):
-        if not d:
-            return None
-        cand = os.path.join(d, "STATUS.md")
-        if os.path.exists(cand):
-            return cand
-        parent = os.path.dirname(d)
-        if not parent or parent == d:
-            return None
-        d = parent
-    return None
+def find_status(cwd=None):
+    """全局卡（2026-09-24 用户拍板）：不再按项目定义，任何框架 / 任何目录共用一张卡。
+
+    旧行为（从 cwd 向上 6 层找 STATUS.md）已退役。取舍：放弃"项目级隔离"，
+    换取跨框架 / 跨目录的可用性——归属用卡内【项目】前缀表达，而不是目录结构。
+    """
+    return GLOBAL_STATUS if os.path.exists(GLOBAL_STATUS) else None
 
 
 def render_status(cwd):
-    """读 cwd 向上第一个 STATUS.md 的工程状态区（截断）。"""
+    """读全局卡的工程状态区（截断）。"""
     status = find_status(cwd)
     if not status:
         return ""
@@ -46,7 +41,26 @@ def render_status(cwd):
     seg = m.group(0)
     if len(seg) > LIMIT:
         seg = seg[:LIMIT] + "\n...(已截断)"
-    return "【记忆系统 · 当前项目工程状态（追加注入）】\n\n" + seg + "\n"
+    return "【记忆系统 · 全局工程状态（追加注入）】\n\n" + seg + "\n"
+
+
+def contract_hint():
+    """L1/L3 读写契约（极简；随状态卡一起在会话首次用户消息尾部注入）。
+
+    2026-09-24 用户要求：契约不进 SKILL.md 头部（那属于固定前缀，改了会碎缓存），
+    改为尾部注入一次。形态与 L2 状态注入完全一致。
+    """
+    home = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    recall = os.path.join(home, "scripts", "recall.py")
+    return (
+        "\n[Varve 契约 · 尾部注入]\n"
+        "- 回溯：提到「上次 / 之前 / 当时 / 那个坑」或要断言历史事实时，先检索再回答——\n"
+        "  python -X utf8 \"" + recall + "\" \"关键词1\" \"关键词2\"\n"
+        "  （多变体一次调用；中文 2 字词直接查，短词走字面兜底）检索不到就直说「没找到」，不要编。\n"
+        "- 收尾：任务状态有推进 → 更新全局卡 " + GLOBAL_STATUS + "；可迁移的教训 → records；环境变化 → ENVIRONMENT.md。\n"
+        "- 兜底：当前目录未被登记时（projects.md 无此项），跑 pwsh -NoProfile -File \""
+        + os.path.join(home, "scripts", "sync-projects.ps1") + "\"（hook 正常时应自动完成）。\n"
+    )
 
 
 def staging_hint():
@@ -116,9 +130,10 @@ def sync_projects():
     paths = []
     with open(cfg, encoding="utf-8", errors="replace") as fh:
         for line in fh:
-            m = re.match(r"\s*\[projects\.'([^']+)'\]", line)
+            # 兼容单/双引号两种写法（盲测 #8：Codex 若写双引号，旧正则永远发现不到）
+            m = re.match(r"""\s*\[projects\.(?:'([^']+)'|"([^"]+)")\]""", line)
             if m:
-                paths.append(m.group(1))
+                paths.append(m.group(1) or m.group(2))
     with open(pf, encoding="utf-8", errors="replace") as fh:
         content = fh.read()
     new = [p for p in dict.fromkeys(paths) if p not in content]

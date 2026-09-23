@@ -203,7 +203,8 @@ def aggregate(results_by_variant, limit):
         sessions.append({
             "session_id": sid, "workspace": row[1], "date": row[2],
             "score": round(sum(sc for sc, _ in top), 5), "hits": len(items),
-            "source": row[6], "title": re.sub(r"\s+", " ", block_meta[top[0][1]][8] or "")[:60],
+            # 盲测 #14：该字段是命中片段预览（FTS snippet），不是"标题"——改名以免误导
+            "preview": re.sub(r"\s+", " ", block_meta[top[0][1]][8] or "")[:60],
             "snippets": [{"turn": k[2], "src": [block_meta[k][4], block_meta[k][5]],
                           "text": block_meta[k][8]} for _, k in top],
         })
@@ -301,7 +302,7 @@ def main():
     for i, s in enumerate(sessions, 1):
         print("[" + str(i) + "] " + (s["date"] or "?") + " · " + s["workspace"]
               + " · score=" + str(s["score"]) + " · " + str(s["hits"]) + "块")
-        print("    " + (s["title"] or "(无标题)") + "   [" + s["session_id"][:8] + "]")
+        print("    " + (s["preview"] or "(无片段)") + "   [" + s["session_id"][:8] + "]")
         for sn in s["snippets"]:
             print("    ├ turn " + str(sn["turn"]) + "  src:" + str(sn["src"][0]) + "-" + str(sn["src"][1]))
             print("    │  " + sn["text"].replace("\n", " ")[:180])

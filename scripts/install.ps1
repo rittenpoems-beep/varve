@@ -60,6 +60,17 @@ foreach ($d in @("", "index", "records", "staging")) {
 Good ("数据目录: " + $DataRoot)
 Warn ("其他脚本要找到它，请设置环境变量：`$env:VARVE_DATA = `"" + $DataRoot + "`"（可在系统设置里持久化）")
 
+$globalStatus = Join-Path $DataRoot "STATUS.md"
+if (-not (Test-Path -LiteralPath $globalStatus)) {
+    $tmpl = Join-Path $installDir "templates\global-status.template.md"
+    if (Test-Path -LiteralPath $tmpl) {
+        Copy-Item -LiteralPath $tmpl -Destination $globalStatus
+        Good ("已创建全局卡: " + $globalStatus)
+    } else { Warn "templates\global-status.template.md 缺失，跳过全局卡" }
+} else {
+    Good ("全局卡已存在: " + $globalStatus)
+}
+
 # ---------- 3. hooks.json ----------
 Step "3/5 hooks.json"
 

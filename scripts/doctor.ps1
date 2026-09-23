@@ -35,10 +35,19 @@ $sess = Join-Path $env:USERPROFILE ".codex\sessions"
 $n = if (Test-Path -LiteralPath $sess) { (Get-ChildItem $sess -Recurse -Filter *.jsonl -ErrorAction SilentlyContinue | Measure-Object).Count } else { 0 }
 Chk "Codex 会话日志" ($n -gt 0) ("$n 个 jsonl" + $(if ($n -eq 0) { "（尚无会话可索引）" } else { "" }))
 
-# 4. hooks 安装
+# 4. hooks 安装（项目级 / 全局级）
 $projAbs = [System.IO.Path]::GetFullPath($Project)
 $hooks = Join-Path $projAbs ".codex\hooks.json"
-Chk "hooks.json 已安装" (Test-Path -LiteralPath $hooks) $hooks
+$globalHooks = Join-Path $env:USERPROFILE ".codex\hooks.json"
+$hasGlobalHooks = if (Test-Path -LiteralPath $globalHooks) {
+    [bool](Select-String -Path $globalHooks -Pattern "hook-session-start" -SimpleMatch -Quiet)
+} else { $false }
+Chk "hooks（项目级）" (Test-Path -LiteralPath $hooks) $hooks
+Chk "hooks（全局级）" $hasGlobalHooks $(if ($hasGlobalHooks) { $globalHooks } else { "未装（全局卡模式下推荐装到 ~/.codex/hooks.json）" })
+
+# 4.5 全局卡
+$globalStatus = Join-Path $DataRoot "STATUS.md"
+Chk "全局卡 STATUS.md" (Test-Path -LiteralPath $globalStatus) $globalStatus
 
 # 5. 索引状态（--stats 走只读路径，不会触发 rebuild）
 $db = Join-Path $DataRoot "index\sessions.db"
