@@ -34,6 +34,21 @@ Zero LLM calls. Zero third-party dependencies (Python standard library + PowerSh
 | Concurrent writers clobber a file | Whole-file rewrite | Staging: proposal → arbitration → atomic commit |
 | Switching directories or frameworks loses memory | Install one setup per project | **Global card**: one state card for every directory; the mechanism never depends on a "project" concept |
 
+## Real-world scale
+
+These are not illustrative numbers — they come from 8 days of continuous use in the author's own environment:
+
+| Metric | Value |
+|---|---|
+| Session requests | 4,539 |
+| Cumulative input tokens | ≈ 1.4 billion |
+| Cache hit rate | 96% (a direct beneficiary of tail-append injection) |
+| Index size | 549 conversation turns · 20,738 trace records |
+| Database size | 82.5 MB (local SQLite, rebuildable at any time) |
+| Audit result | `audit.py` all PASS (0 orphans · 0 duplicates · 6/6 sync triggers) |
+
+That workload is exactly the target scenario: one developer pushing several projects at once, hundreds of agent turns per day.
+
 ## Compatibility
 
 ### What Varve adapts to

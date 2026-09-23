@@ -45,10 +45,10 @@ def render_status(cwd):
 
 
 def contract_hint():
-    """L1/L3 读写契约（极简；随状态卡一起在会话首次用户消息尾部注入）。
+    """L1/L3 读写契约（极简；在会话首次用户消息尾部注入一次——**与状态卡是否存在无关**）。
 
     2026-09-24 用户要求：契约不进 SKILL.md 头部（那属于固定前缀，改了会碎缓存），
-    改为尾部注入一次。形态与 L2 状态注入完全一致。
+    改为尾部注入一次。形态与 L2 状态注入一致；即使状态卡缺失也照常注入契约。
     """
     home = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     recall = os.path.join(home, "scripts", "recall.py")
@@ -72,7 +72,9 @@ def init_hint():
     信息机器探不到——首次会话时让模型主动问一句，补进 ENVIRONMENT.md。
     用标记文件保证只提示一次（不是每会话）。
     """
-    flag = os.path.join(DATA_ROOT, "pending", ".init_prompted")
+    # 标记放在数据根而非 pending/ —— 后者会被 cleanup_pending 按 7 天清理，
+    # 会导致"安装后一次性提示"约每 8 天复活（2026-09-24 修正）
+    flag = os.path.join(DATA_ROOT, ".init_prompted")
     if os.path.exists(flag):
         return ""
     try:
@@ -140,6 +142,8 @@ def cleanup_pending(max_age_days=7):
     try:
         now = time.time()
         for fn in os.listdir(PENDING_DIR):
+            if fn.startswith("."):
+                continue          # 点开头的是控制文件，不是 pending 项，别清
             p = os.path.join(PENDING_DIR, fn)
             if os.path.isfile(p) and now - os.path.getmtime(p) > max_age_days * 86400:
                 os.remove(p)

@@ -65,16 +65,28 @@ def main():
     if dup:
         issues.append("B: %d 个 (session_id, turn_no) 来自多个 source（resume 重叠入库）" % dup)
 
-    # C. 索引新鲜度
-    def meta(k):
-        r = con.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
-        return r[0] if r else None
-    built, updated = meta("index_built_at"), meta("content_updated_at")
-    report["C_index"] = {"built": built, "content_updated": updated,
-                         "stale": bool(built and updated and built != updated)}
-    if built and updated and built != updated:
-        issues.append("C: 索引落后于内容（built=%s / content=%s）→ 跑 build-search-index.py"
-                      % (built, updated))
+    # C. 索引一致性（schema 3 语义：触发器在位 + 行数对账）
+    # 不再比较 index_built_at / content_updated_at —— 触发器模式下写入即入索引，
+    # 这两个时间戳本就会分叉，用它们判断会恒报"落后"（2026-09-24 修正）。
+    NEED_TRIGGERS = ("turns_ai", "turns_ad", "turns_au", "traces_ai", "traces_ad", "traces_au")
+    have_triggers = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+    missing = [n for n in NEED_TRIGGERS if n not in have_triggers]
+    try:
+        t_cnt = con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+        tf_cnt = con.execute("SELECT COUNT(*) FROM turns_fts").fetchone()[0]
+        r_cnt = con.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
+        rf_cnt = con.execute("SELECT COUNT(*) FROM traces_fts").fetchone()[0]
+    except sqlite3.OperationalError as e:
+        issues.append("C: 索引结构缺失（" + str(e) + "）→ 跑 session-digest.py + build-search-index.py")
+        t_cnt = tf_cnt = r_cnt = rf_cnt = 0
+    report["C_index"] = {"triggers_missing": missing,
+                         "turns": [t_cnt, tf_cnt], "traces": [r_cnt, rf_cnt],
+                         "ok": (not missing) and t_cnt == tf_cnt and r_cnt == rf_cnt}
+    if missing:
+        issues.append("C: 缺同步触发器 " + ", ".join(missing) + " → 跑 build-search-index.py 补建")
+    if t_cnt != tf_cnt or r_cnt != rf_cnt:
+        issues.append("C: FTS 行数与内容不一致（turns %d/%d, traces %d/%d）→ 跑 build-search-index.py --force"
+                      % (t_cnt, tf_cnt, r_cnt, rf_cnt))
 
     # D. 检索自检（抽样反查）
     hit = miss = 0
@@ -96,9 +108,7 @@ def main():
         issues.append("D: 检索自检 %d/%d 未命中（FTS 通路可疑）" % (miss, len(rows)))
 
     # E. 体量
-    t = con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
-    tr = con.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
-    report["E_size"] = {"db_mb": round(os.path.getsize(db) / 1e6, 1), "turns": t, "traces": tr}
+    report["E_size"] = {"db_mb": round(os.path.getsize(db) / 1e6, 1), "turns": t_cnt, "traces": r_cnt}
     con.close()
 
     # F. L2 体积（防注入膨胀：滚动窗口应保持有界）
@@ -120,9 +130,13 @@ def main():
         print("  A 一致性: sources turns=%d traces=%d file_state=%d | 孤儿=%d 幽灵=%d"
               % (len(src_turns), len(src_traces), len(files), len(orphan_turns), len(ghost)))
         print("  B 重复入库: %d" % dup)
-        print("  C 索引: built=%s content=%s %s" % (built, updated, "（落后）" if report["C_index"]["stale"] else "（一致）"))
+        c = report["C_index"]
+        print("  C 索引: 触发器 %d/6 | turns %d/%d traces %d/%d %s"
+              % (6 - len(c["triggers_missing"]), c["turns"][0], c["turns"][1],
+                 c["traces"][0], c["traces"][1], "（一致）" if c["ok"] else "（异常）"))
         print("  D 检索自检: %d/%d 命中" % (hit, len(rows)))
-        print("  E 体量: %.1f MB | turns=%d traces=%d" % (report["E_size"]["db_mb"], t, tr))
+        print("  E 体量: %.1f MB | turns=%d traces=%d"
+              % (report["E_size"]["db_mb"], report["E_size"]["turns"], report["E_size"]["traces"]))
         print("  F 全局卡: %d 字符 / 预算 %d" % (report["F_l2"]["chars"], report["F_l2"]["budget"]))
         print("")
         if issues:

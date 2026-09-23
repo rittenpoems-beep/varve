@@ -9,8 +9,11 @@ install.ps1 — Varve 安装器：让一个陌生用户从零到"记忆自动生
   5. 输出 AGENTS.md 规则句（打印；-AppendAgents 可自动追加到用户 AGENTS.md）
 
 用法：
-  pwsh -NoProfile -File scripts\install.ps1 -Project D:\my-project
-  pwsh -NoProfile -File scripts\install.ps1 -Project . -DataRoot D:\varve-data -AppendAgents
+  pwsh -NoProfile -File scripts\install.ps1
+      # 默认 -Scope user：写 ~/.codex/hooks.json，对所有工作区生效（推荐，与 install-claude.ps1 对称）
+  pwsh -NoProfile -File scripts\install.ps1 -Scope project -Project D:\my-project
+      # 只对该项目生效
+  pwsh -NoProfile -File scripts\install.ps1 -DataRoot D:\varve-data -AppendAgents
 
 退出码：0 = 全部检查通过；1 = 存在 [FAIL] 项（供 CI / 自动化感知，2026-09-23 修）。
 装完后唯一的手动步骤：在 Codex UI 里点一次 hooks 信任（New hook - review required）。
@@ -19,7 +22,8 @@ param(
     [string]$Project = ".",
     [string]$DataRoot = "",
     [switch]$AppendAgents,
-    [switch]$Force
+    [switch]$Force,
+    [ValidateSet("user", "project")][string]$Scope = "user"
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,11 +76,17 @@ if (-not (Test-Path -LiteralPath $globalStatus)) {
 }
 
 # ---------- 3. hooks.json ----------
-Step "3/5 hooks.json"
+Step ("3/5 hooks.json（scope=" + $Scope + "）")
 
-$projAbs = [System.IO.Path]::GetFullPath($Project)
-if (-not (Test-Path -LiteralPath $projAbs)) { Bad ("目标项目不存在: " + $projAbs); exit 1 }
-$codexDir = Join-Path $projAbs ".codex"
+# 默认 user：写 ~/.codex/hooks.json，对所有工作区生效（与 install-claude.ps1 对称）
+# project：只写 <Project>/.codex/hooks.json，仅该项目生效
+if ($Scope -eq "project") {
+    $projAbs = [System.IO.Path]::GetFullPath($Project)
+    if (-not (Test-Path -LiteralPath $projAbs)) { Bad ("目标项目不存在: " + $projAbs); exit 1 }
+    $codexDir = Join-Path $projAbs ".codex"
+} else {
+    $codexDir = Join-Path $env:USERPROFILE ".codex"
+}
 $hooksPath = Join-Path $codexDir "hooks.json"
 $pyExe = $py.Source -replace "\\", "/"
 $scriptDir = ($PSScriptRoot -replace "\\", "/")

@@ -154,20 +154,37 @@ def run_like(con, term, workspace, since, limit):
 # ---------- 轨迹层（traces_fts，--deep）----------
 
 def run_traces(con, variant, limit=60):
-    q = variant if len(variant) >= 3 else variant           # 短词走 LIKE
+    """轨迹层检索（--deep）。
+
+    跨 source 重叠去重（2026-09-24）：resume 会话会产生内容重叠的多个 rollout，
+    同一条轨迹会以不同 source 重复入库并稀释 BM25。这里按
+    (session, kind, 文本前 240 字符) 去重 —— 与 turns 侧的写入去重对称。
+    为抵消去重带来的损耗，查询侧多取一些再截断。
+    """
+    cap = max(limit * 2, limit + 20)
     try:
         if len(variant) < 3:
-            return con.execute(
+            rows = con.execute(
                 "SELECT session_id, seq, kind, src_line, -2.0 AS s, substr(text, 1, 160) "
-                "FROM traces WHERE text LIKE ? LIMIT ?", ("%" + variant + "%", limit)).fetchall()
-        return con.execute(
-            "SELECT tr.session_id, tr.seq, tr.kind, tr.src_line, bm25(traces_fts) AS s, "
-            "snippet(traces_fts, -1, '[', ']', '…', 16) "
-            "FROM traces_fts JOIN traces tr ON tr.rowid = traces_fts.rowid "
-            "WHERE traces_fts MATCH ? ORDER BY s LIMIT ?", (fts_quote(q), limit)).fetchall()
+                "FROM traces WHERE text LIKE ? LIMIT ?", ("%" + variant + "%", cap)).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT tr.session_id, tr.seq, tr.kind, tr.src_line, bm25(traces_fts) AS s, "
+                "snippet(traces_fts, -1, '[', ']', '…', 16) "
+                "FROM traces_fts JOIN traces tr ON tr.rowid = traces_fts.rowid "
+                "WHERE traces_fts MATCH ? ORDER BY s LIMIT ?",
+                (fts_quote(variant), cap)).fetchall()
     except sqlite3.OperationalError as e:
-        print("warn: 轨迹查询失败 [" + q + "]: " + str(e), file=sys.stderr)
+        print("warn: 轨迹查询失败 [" + variant + "]: " + str(e), file=sys.stderr)
         return []
+    seen, out = set(), []
+    for row in rows:
+        key = (row[0], row[2], (row[5] or "")[:240])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out[:limit]
 
 
 def since_to_date(since):

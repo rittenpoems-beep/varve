@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-24
+
 ### Added
 
 - **Claude Code adapter** (second framework): `install-claude.ps1` writes `~/.claude/settings.json`
@@ -17,6 +19,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the index adapter can be written against real data instead of guesswork.
 - README (both languages): explicit compatibility scope — Codex and Claude Code only, with the
   reasoning for why other framework categories are not applicable.
+
+### Fixed
+
+- `build-search-index.py` no longer performs a full rebuild when sync triggers are active — previously
+  every session start rebuilt the entire FTS index even though the triggers already kept it current
+  (`--force` still rebuilds explicitly).
+- `audit.py` index check rewritten: it now verifies trigger presence and reconciles FTS row counts
+  against content row counts, instead of comparing `index_built_at` / `content_updated_at`
+  (which reported a false "stale index" under the trigger era).
+- `init_hint` marker moved out of `pending/` — the 7-day pending cleanup recycled it, so the
+  one-time install prompt reappeared roughly every 8 days. Pending cleanup now also skips dotfiles.
+- `contract_hint` documented correctly: the contract is injected on first prompt **whether or not**
+  a state card exists (implementation was right, the comment was stale).
+- `install.ps1` gained `-Scope user|project` (default `user`, writing `~/.codex/hooks.json`), matching
+  what the docs described; previously it only wrote project-level hooks.
+- `recall.py --deep` de-duplicates cross-source overlapping traces (resume sessions produced duplicate
+  trace rows that diluted BM25; this mirrors the existing `turns` de-duplication).
+- Size reporting unified to MB = 10^6 bytes across `audit.py` and `build-search-index.py`.
 
 ## [0.1.0] - 2026-09-24
 

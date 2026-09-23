@@ -125,6 +125,15 @@ def main():
         con.close()
         return 1
 
+    # 在**建触发器之前**探测是否已处于"触发器同步模式"（schema 3）。
+    # 该模式下写入即进索引，全量 rebuild 是纯浪费——旧的条件 rebuild（比时间戳）
+    # 会在每次内容变化时触发，等于每次会话启动重建整个 FTS（2026-09-24 修正）。
+    had_triggers = all(
+        con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?",
+                    (n,)).fetchone()[0]
+        for n in ("turns_ai", "turns_ad", "turns_au", "traces_ai", "traces_ad", "traces_au")
+    )
+
     con.execute(TURNS_FTS)
     con.execute(TRACES_FTS)
     con.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
@@ -132,16 +141,14 @@ def main():
         con.execute(trig)
     con.commit()
 
-    # 条件 rebuild：内容没变就跳过（避免每次 SessionStart 重建整个索引）
-    if not args.force:
-        last = con.execute("SELECT v FROM meta WHERE k='content_updated_at'").fetchone()
-        built = con.execute("SELECT v FROM meta WHERE k='index_built_at'").fetchone()
-        if last and built and last[0] == built[0]:
-            t0 = con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
-            r0 = con.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
-            print("no content changes, skip rebuild (turns=" + str(t0) + " traces=" + str(r0) + ")")
-            con.close()
-            return 0
+    t0 = con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+    r0 = con.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
+
+    if had_triggers and not args.force:
+        print("sync triggers active, skip rebuild (turns=" + str(t0) + " traces=" + str(r0)
+              + ") | 强制重建请加 --force")
+        con.close()
+        return 0
 
     con.execute("INSERT INTO turns_fts(turns_fts) VALUES('rebuild')")
     con.execute("INSERT INTO traces_fts(traces_fts) VALUES('rebuild')")
@@ -152,7 +159,7 @@ def main():
 
     t = con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
     r = con.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
-    sz = round(os.path.getsize(db) / 1024.0 / 1024.0, 1)
+    sz = round(os.path.getsize(db) / 1e6, 1)   # 与 audit.py 统一口径：MB = 10^6 字节
     print("index rebuilt: turns=" + str(t) + " traces=" + str(r) + " db_mb=" + str(sz)
           + " | 同步触发器已就位（后续写入自动进索引）")
     con.close()

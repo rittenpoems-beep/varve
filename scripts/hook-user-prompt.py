@@ -49,8 +49,8 @@ def main():
             status = C.render_status(info.get("cwd") or "")
             if status:
                 parts.append(status)
-            # 契约句随状态卡一起注入（仅会话首次消费时）——替代原先放在 SKILL.md 头部
-            # 的契约（头部属于固定前缀，改动会碎缓存；2026-09-24 用户要求改尾部）
+            # 契约句在会话首次注入一次（**与状态卡是否存在无关**）——替代原先放在
+            # SKILL.md 头部的契约（头部属固定前缀，改动会碎缓存；2026-09-24 改尾部）
             parts.append(C.contract_hint())
             parts.append(C.init_hint())          # 仅安装后首次出现（LLM 回问 L1 补充）
             parts.append(C.staging_hint())
