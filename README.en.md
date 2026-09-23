@@ -34,6 +34,38 @@ Zero LLM calls. Zero third-party dependencies (Python standard library + PowerSh
 | Concurrent writers clobber a file | Whole-file rewrite | Staging: proposal → arbitration → atomic commit |
 | Switching directories or frameworks loses memory | Install one setup per project | **Global card**: one state card for every directory; the mechanism never depends on a "project" concept |
 
+## Compatibility
+
+Varve adapts to two frameworks today, and does not plan to expand:
+
+| Framework | State injection | History search | Notes |
+|---|---|---|---|
+| **Codex** | ✅ Adapted · end-to-end tested | ✅ | Primary target |
+| **Claude Code** | ✅ Adapted · verified at script level | ⏳ sample pending | Same scripts; hook contract mirrors Codex |
+| Other frameworks | ❌ Not applicable | ❌ | See positioning below |
+
+### Why only these two
+
+Varve targets **heavy agent developers running several projects in parallel** — CLI harness as the main tool, sensitive to token cost, willing to configure hooks. Their tooling converges on Codex and Claude Code.
+
+Other categories (IDE-like Cursor / Trae / Qoder, office-like WorkBuddy, library-like LangChain) are not "not done yet" — they are **not applicable**: they have no tail-append injection channel, and Varve's cache-safe design rests on exactly that.
+
+### What each framework needs
+
+**Codex**
+
+- Requirements: Windows + PowerShell 7 + Python 3.10+ (stdlib with SQLite FTS5)
+- Install: `pwsh -NoProfile -File scripts\install.ps1 -Project <your-project>`
+- Manual step: approve the hooks once in the Codex UI
+
+**Claude Code**
+
+- Requirements: Python 3.10+
+- Install: `pwsh -NoProfile -File scripts\install-claude.ps1` (writes user-level `~/.claude/settings.json`; `-Scope project -Project <dir>` installs per project)
+- Manual step: none (settings.json has no trust flow)
+- Limit: `additionalContext` is capped at 10,000 characters (current state card ≈ 2.5k, safe)
+- ⚠️ Status: **state injection** is implemented against the official hook contract and verified with simulated payloads; **history search is not supported yet** — the Claude Code transcript format is unverified, so first run `python -X utf8 scripts\probe-claude-transcript.py` on a machine with Claude Code to sample it
+
 ## Quick start
 
 **Requirements**: Windows + PowerShell 7 + Python 3.10+ (stdlib build with SQLite FTS5).

@@ -34,6 +34,38 @@
 | 多会话并发写文件 | 整文件重写 → 丢更新 | staging 三段式：提案 → 裁决 → 原子提交 |
 | 换目录 / 换框架就失忆 | 每个项目各装一套 | **全局卡**：任何目录共用一张状态卡，机制层不依赖"项目"定义 |
 
+## 兼容性
+
+Varve 目前适配两个框架，**不打算再扩**：
+
+| 框架 | 状态卡注入 | 历史检索 | 说明 |
+|---|---|---|---|
+| **Codex** | ✅ 已适配 · 端到端实测 | ✅ | 主力目标 |
+| **Claude Code** | ✅ 已适配 · 脚本层验证 | ⏳ 待样本 | 与 Codex 同构，同一对脚本复用 |
+| 其他框架 | ❌ 不适用 | ❌ | 见下方定位说明 |
+
+### 为什么只做这两家
+
+Varve 的目标用户是**多项目并行的重度 agent 开发者**——把 CLI harness 当主力工具、对 token 成本敏感、愿意配置 hook。这类人的工具选择集中在 Codex 和 Claude Code。
+
+其他类别（IDE 类如 Cursor / Trae / Qoder，办公类如 WorkBuddy，库类如 LangChain）不是"暂时没做"，是**不适用**：它们没有"尾部追加注入"这条通道，而 Varve 缓存安全的核心设计正建立在它之上。
+
+### 各框架需要什么
+
+**Codex**
+
+- 依赖：Windows + PowerShell 7 + Python 3.10+（stdlib 含 SQLite FTS5）
+- 安装：`pwsh -NoProfile -File scripts\install.ps1 -Project <你的项目>`
+- 手动步骤：在 Codex UI 里点一次 hooks 信任
+
+**Claude Code**
+
+- 依赖：Python 3.10+
+- 安装：`pwsh -NoProfile -File scripts\install-claude.ps1`（默认写用户级 `~/.claude/settings.json`；`-Scope project -Project <目录>` 装到项目级）
+- 手动步骤：无（settings.json 不需要信任流程）
+- 上限：`additionalContext` 10,000 字符（当前状态卡约 2.5k，安全）
+- ⚠️ 现状：**状态卡注入**已实现（按官方 hook 契约 + 模拟 payload 验证）；**历史检索暂不支持**——Claude Code 的 transcript 格式未验证，先在有 Claude Code 的机器上跑 `python -X utf8 scripts\probe-claude-transcript.py` 采样，再据此补索引适配
+
 ## 快速开始（3 步）
 
 **环境要求**：Windows + PowerShell 7 + Python 3.10+（标准库含 SQLite FTS5）。

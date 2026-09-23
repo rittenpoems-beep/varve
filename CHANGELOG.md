@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Claude Code adapter** (second framework): `install-claude.ps1` writes `~/.claude/settings.json`
+  (user scope by default, `-Scope project` for a single repo) and merges instead of overwriting.
+  The same hook scripts serve both frameworks — `hook-user-prompt.py --json-output` emits
+  `hookSpecificOutput.additionalContext`, which Claude Code appends *after* the user message
+  (tail-append, so the cache-safety rule holds).
+- `probe-claude-transcript.py`: samples Claude Code transcript structure (no message content),
+  so the index adapter can be written against real data instead of guesswork.
+- README (both languages): explicit compatibility scope — Codex and Claude Code only, with the
+  reasoning for why other framework categories are not applicable.
+
 ## [0.1.0] - 2026-09-24
 
 First public release.

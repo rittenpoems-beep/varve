@@ -8,6 +8,10 @@
 - 同时保留 L3 层 2 的信号词提醒（同一行注入，成本零）
 
 输出为空 = 无话可说（不污染会话）；任何异常静默退出。
+
+跨框架：加 `--json-output` 时改用 Claude Code 的 JSON 形态输出
+（`hookSpecificOutput.additionalContext`，官方文档明确"追加在用户消息之后"）。
+不带参数时输出纯文本 stdout，供 Codex 使用。
 """
 import json
 import os
@@ -61,7 +65,15 @@ def main():
 
     out = "\n".join(p for p in parts if p)
     if out.strip():
-        sys.stdout.buffer.write(out.encode("utf-8"))
+        if "--json-output" in sys.argv:
+            sys.stdout.write(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": out,
+                }
+            }, ensure_ascii=False))
+        else:
+            sys.stdout.buffer.write(out.encode("utf-8"))
         sys.stdout.flush()
     return 0
 
