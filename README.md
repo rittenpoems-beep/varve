@@ -1,10 +1,14 @@
 # Varve
 
+[English](README.en.md) | **简体中文**
+
 **给 AI 编码助手（Codex 及后续框架）的跨会话记忆层**——三层结构（环境 / 状态 / 历史）、**只追加的注入**（不破坏 prompt 缓存）、**SQLite 全文检索**、**全局状态卡**（跨工作区 / 跨框架）。
 
 零 LLM 调用、零第三方依赖（Python 标准库 + PowerShell 7）。
 
 > 名字来自地质学：**varve**（纹泥）是冰川湖底的年层沉积——一层记录一年，层层叠加、永不重写、可回溯到任意一层。这正是它的三条原则：**只追加、可重建、可定位**。
+
+> 状态：早期可用（v0.1）。已在真实项目上连续使用，索引层带审计与回归用例（见 [FIXES.md](FIXES.md)）。
 
 ## 它解决什么
 
@@ -54,6 +58,7 @@ python -X utf8 scripts\recall.py "报错内容" --deep     # 加搜工具调用/
 | `build-search-index.py` | 建 FTS5 索引（内容未变则跳过） |
 | `recall.py` | 检索 CLI：records → 对话历史 → 轨迹层（`--deep`） |
 | `audit.py` | 记忆库审计：一致性 / 重复入库 / 索引新鲜度 / 检索自检 / 体量 |
+| `env-scan.py` | 环境扫描：只记 harness 不注入的项，刷新 `ENVIRONMENT.md` 的自动探测区 |
 | `hook-session-start.py` | 会话启动：标记待注入（零输出） |
 | `hook-user-prompt.py` | 用户消息：追加注入状态 + 历史信号词提醒 |
 | `hook-build-index.py` | 静默重建索引（hook 包装） |
@@ -61,6 +66,7 @@ python -X utf8 scripts\recall.py "报错内容" --deep     # 加搜工具调用/
 | `init.ps1` / `sync-projects.ps1` / `build-docs-index.ps1` | 初始化 / 工作区发现 / 文档索引 |
 | `staging/` | 并发写入：提案 → 裁决 → 原子提交（含压测脚本） |
 | `templates/` | 状态卡模板 / 记录模板 / Skill 模板 / AGENTS 规则句 |
+| `FIXES.md` | 已修复清单（每条含"复发检查"方法，供回归对照） |
 
 ## 工作原理（简版）
 
@@ -84,6 +90,16 @@ SQLite 单库 ── turns（对话历史：每轮问答）
 **全局卡（2026-09-24 起）**：状态卡只有一张 —— `<VARVE_DATA>\STATUS.md`。不按项目定义、不依赖目录结构，
 任何框架 / 任何目录的会话都注入同一张（归属用条目里的【项目】前缀表达）。取舍见下方「已知限制」。
 
+**索引的一致性**：`turns` / `traces` 使用**顺序稳定 id**（写入即定，删除重插不变），并通过 SQLite 触发器与 FTS5 索引**实时同步**——
+不存在"内容已更新但索引还是旧的"的中间窗口，也不需要每次全量重建。
+
+## 数据与隐私
+
+- 数据全部落在本机：会话日志（`~/.codex/sessions/`）**只读**，派生的 SQLite 库与状态卡都在 `<VARVE_DATA>` 下，**不上传任何地方**。
+- 库是**可重建**的：删掉 `<VARVE_DATA>/index/` 后跑一次 `session-digest.py` + `build-search-index.py` 即可从原始日志重算。
+- 检索是**本地全文匹配**（SQLite FTS5），没有 embedding、没有外部 API 调用。
+- 若要把本项目用于团队共享，注意 `<VARVE_DATA>/STATUS.md` 会包含你的任务状态——建议放进 `.gitignore` 或单独的私有目录。
+
 ## 已知限制（诚实标注）
 
 - **目前只适配 Codex**（通过 `.codex/hooks.json` + 两个 hook）。架构上按适配层设计、便于扩展，但**其他框架的适配尚未实现**。
@@ -91,6 +107,12 @@ SQLite 单库 ── turns（对话历史：每轮问答）
 - Windows / PowerShell 优先；Python 部分跨平台。
 - **状态卡是全局的**：不按项目隔离，多项目任务状态混在一张卡里（用【项目】前缀区分）——为跨框架可用性做的主动取舍。
 - **全局 hooks 需手动点一次信任**：`~/.codex/hooks.json` 内容变更后，Codex 会要求重新信任才生效。
+
+## 反馈与贡献
+
+- 发现 bug 或行为不符：请附上 `python -X utf8 scripts/audit.py` 的输出，多数问题能据此定位。
+- 提交修复后请顺带更新 [FIXES.md](FIXES.md)（问题 / 修复点 / 复发检查三段式）。
+- 已知问题与修复历史集中在 [FIXES.md](FIXES.md)，设计文档不在本仓库（公开版只含成品）。
 
 ## License
 
