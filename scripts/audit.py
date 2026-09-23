@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import random
+import re
 import sqlite3
 import sys
 
@@ -100,6 +101,18 @@ def main():
     report["E_size"] = {"db_mb": round(os.path.getsize(db) / 1e6, 1), "turns": t, "traces": tr}
     con.close()
 
+    # F. L2 体积（防注入膨胀：滚动窗口应保持有界）
+    l2 = os.path.join(args.data, "STATUS.md")
+    if os.path.exists(l2):
+        txt = open(l2, encoding="utf-8", errors="replace").read()
+        m = re.search(r"<!-- =+ 工程状态区.*?<!-- =+ 工程状态区 结束", txt, re.DOTALL)
+        seg = m.group(0) if m else txt
+        report["F_l2"] = {"chars": len(seg), "budget": 3500}
+        if len(seg) > 3500:
+            issues.append("F: 全局卡工程状态区 %d 字符 > 预算 3500（注入会被截断；细节移进 records）" % len(seg))
+    else:
+        report["F_l2"] = {"chars": 0, "budget": 3500, "note": "全局卡不存在"}
+
     if args.json:
         print(json.dumps({"issues": issues, "report": report}, ensure_ascii=False, indent=2))
     else:
@@ -110,6 +123,7 @@ def main():
         print("  C 索引: built=%s content=%s %s" % (built, updated, "（落后）" if report["C_index"]["stale"] else "（一致）"))
         print("  D 检索自检: %d/%d 命中" % (hit, len(rows)))
         print("  E 体量: %.1f MB | turns=%d traces=%d" % (report["E_size"]["db_mb"], t, tr))
+        print("  F 全局卡: %d 字符 / 预算 %d" % (report["F_l2"]["chars"], report["F_l2"]["budget"]))
         print("")
         if issues:
             print("发现 %d 个问题：" % len(issues))

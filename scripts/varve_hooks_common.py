@@ -58,6 +58,8 @@ def contract_hint():
         "  python -X utf8 \"" + recall + "\" \"关键词1\" \"关键词2\"\n"
         "  （多变体一次调用；中文 2 字词直接查，短词走字面兜底）检索不到就直说「没找到」，不要编。\n"
         "- 收尾：任务状态有推进 → 更新全局卡 " + GLOBAL_STATUS + "；可迁移的教训 → records；环境变化 → ENVIRONMENT.md。\n"
+        "- 环境/工具异常（命令报错、依赖缺失、路径不对）→ 读 " + os.path.join(DATA_ROOT, "ENVIRONMENT.md") + "。\n"
+        "  该文件**不注入**（harness 已自动注入 cwd/shell/日期/时区/工作区根/权限档，重复注入纯属浪费）。\n"
         "- 兜底：当前目录未被登记时（projects.md 无此项），跑 pwsh -NoProfile -File \""
         + os.path.join(home, "scripts", "sync-projects.ps1") + "\"（hook 正常时应自动完成）。\n"
     )
