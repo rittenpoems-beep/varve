@@ -4,7 +4,9 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-09-25
+
+**主题：L2 从"就地改写的文档"改为"只增不减的完整快照序列"。**
 
 ### Changed
 
@@ -23,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (idempotent, auto-backup, supports `--dry-run`).
 - `render_status()` falls back to the legacy whole-section rendering when no snapshot marker is present, so
   existing cards keep working without migration.
+
+### Fixed
+
+- **Truncation dropped the newest state first.** The injection guard cut the card from the front
+  (`seg[:3500]`), so once a card exceeded the budget the *most recent* entries disappeared first — measured on a
+  real card on 2026-09-25: 4107 chars against a 3500 budget, with the newest line cut mid-sentence. Only the last
+  snapshot is rendered now, so card growth can no longer cost the newest information.
+- **Rolled-off completions were lost forever.** "Recently completed (≤5)" was a rolling list: a 6th item pushed
+  the 1st out of existence. Completion history now lives in the snapshot where the task ended and is never
+  deleted — the list can no longer overflow because there is no list.
+- **Card drift was invisible.** A delivered task could sit under "in progress" indefinitely (observed: the audit
+  script shipped 2026-09-24 was still listed as active the next day), and a stale banner could coexist with
+  current work. Snapshots are timestamped and append-only, so a stale line is readable as "last stated N days
+  ago" instead of silently passing as current.
 
 ## [0.1.1] - 2026-09-24
 
