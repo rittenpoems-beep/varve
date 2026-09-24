@@ -117,6 +117,7 @@ pwsh -NoProfile -File scripts\doctor.ps1 -Project D:\your-project
 python -X utf8 scripts\session-digest.py          # 会话日志 -> SQLite
 python -X utf8 scripts\build-search-index.py      # 建 FTS5 索引
 python -X utf8 scripts\recall.py "关键词1" "关键词2"   # 检索（由粗到细）
+python -X utf8 scripts\recall.py --topic "快照流"     # 主题时间线（演化型：三源合并，按时间排开）
 python -X utf8 scripts\recall.py --timeline --since 14d
 python -X utf8 scripts\recall.py "报错内容" --deep     # 加搜工具调用/输出层
 ```
@@ -130,7 +131,7 @@ python -X utf8 scripts\recall.py "报错内容" --deep     # 加搜工具调用/
 | `check-env.py` | 探测 Python / SQLite / FTS5 / trigram |
 | `session-digest.py` | 会话日志 → SQLite（对话历史 + 轨迹历史） |
 | `build-search-index.py` | 建 FTS5 索引（内容未变则跳过） |
-| `recall.py` | 检索 CLI：records → 对话历史 → 轨迹层（`--deep`） |
+| `recall.py` | 检索 CLI：records → 对话历史 → 轨迹层（`--deep`）；`--topic` = 主题时间线；输出末尾带【覆盖】行 |
 | `audit.py` | 记忆库审计：一致性 / 重复入库 / 索引新鲜度 / 检索自检 / 体量 |
 | `env-scan.py` | 环境扫描：只记 harness 不注入的项，刷新 `ENVIRONMENT.md` 的自动探测区 |
 | `hook-session-start.py` | 会话启动：标记待注入（零输出） |
@@ -187,6 +188,10 @@ SQLite 单库 ── turns（对话历史：每轮问答）
 - Windows / PowerShell 优先；Python 部分跨平台。
 - **状态卡是全局的**：不按项目隔离，多项目任务状态混在一张卡里（用【项目】前缀区分）——为跨框架可用性做的主动取舍。
 - **全局 hooks 需手动点一次信任**：`~/.codex/hooks.json` 内容变更后，Codex 会要求重新信任才生效。
+- **线索拼装只解决了一部分（2026-09-25 诚实标注）**：`--topic` 与关键词检索都是**逐字匹配**——两条线索若**没有共同词**
+  （例：一处说"在北京"、另一处说"在上海吃饭"），系统**捞不到一起**，也就无从发现冲突。
+  语义索引（阶段 2）/ 实体锚是候选方向，但在本系统体量下作者仍在权衡成本与收益：
+  **当前"锚优先 + 覆盖自述"是权宜解法，不是终解。**
 
 ## 反馈与贡献
 

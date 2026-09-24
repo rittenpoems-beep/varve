@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`recall.py --topic <X>` - topic timeline.** Merges the three sources (L2 snapshots / records / conversation
+  history) into one time-ascending list, for evolution-type questions ("why did we abandon approach A back then").
+  This closes a long-standing gap: the behaviour was specified in the index spec (3.6) on 2026-09-22, but the
+  parameter never existed - `--timeline` had degenerated into "list sessions by date, without a query term".
+- **Coverage self-report.** Every retrieval now ends with a coverage line giving matched / taken / shown counts,
+  so the model can tell that it has *not* seen everything. This addresses the most dangerous failure mode:
+  silently answering from a partial set as if it were complete.
+
+### Known limitations (honest note, 2026-09-25)
+
+- `--topic` matches **literally**. Two clues with no shared word (one says "in Beijing", another says "ate in
+  Shanghai") cannot be pulled into the same view - so their conflict cannot be detected. **That part of "how do I
+  stitch scattered clues back together" is not solved.**
+- Coverage reporting makes the model *aware* of missing evidence; it does not *fill* it.
+- Candidate directions (semantic index / entity anchors) are known, but at this system's scale the author is still
+  weighing cost against benefit - the current combination is a **stopgap, not a final answer**.
+
 ## [0.2.0] - 2026-09-25
 
 **主题：L2 从"就地改写的文档"改为"只增不减的完整快照序列"。**

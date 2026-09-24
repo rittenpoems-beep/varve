@@ -11,8 +11,11 @@
   python -X utf8 recall.py "并发写入"
   python -X utf8 recall.py "hook" "SessionStart" "静默失败"        # 多变体一次调用
   python -X utf8 recall.py "报错" --deep                            # 加搜轨迹层
-  python -X utf8 recall.py --timeline --since 14d                   # 时间线
+  python -X utf8 recall.py --topic "快照流"                          # 主题时间线（演化型：三源合并，按时间排开）
+  python -X utf8 recall.py --timeline --since 14d                   # 会话时间线（按日期列会话）
   python -X utf8 recall.py "worktree" --workspace D:/proj --json
+
+输出末尾的【覆盖】行报告"命中总量 / 展示量"——**未展示不等于不存在**，程序按相关性截断。
 """
 import argparse
 import json
@@ -24,6 +27,9 @@ import time
 
 DEFAULT_DATA = os.environ.get("VARVE_DATA") or os.path.join(os.path.expanduser("~"), ".varve")
 RRF_K = 60
+# 快照流标记（与 varve_hooks_common.py 同源）：--topic 时间线要读 L2 快照序列
+SNAPSHOT_MARK = "<!-- ===== 快照 ===== -->"
+DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
 def fts_quote(v):
@@ -93,62 +99,152 @@ def scan_records(data_root, terms, limit=6):
     return hits
 
 
+# ---------- 主题时间线（--topic，演化型查询）----------
+
+def scan_snapshots(data_root, topic, limit=40):
+    """L2 快照流里含 topic 的条目 -> [(date, label, text)]。"""
+    path = os.path.join(data_root, "STATUS.md")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            txt = fh.read()
+    except OSError:
+        return []
+    out = []
+    parts = txt.split(SNAPSHOT_MARK)
+    for i, seg in enumerate(parts[1:], 1):
+        m = DATE_RE.search(seg)
+        date = m.group(1) if m else ""
+        for ln in seg.splitlines():
+            s = ln.strip()
+            if not s or topic not in s:
+                continue
+            if s.startswith("- ") or s.startswith("**"):
+                out.append((date, "快照#" + str(i), s[:150]))
+    return out[:limit]
+
+
+def scan_records_dated(data_root, topic, limit=40):
+    """records 命中 + 用上文最近的 ### 日期标题补日期 -> [(date, label, text)]。"""
+    rdir = os.path.join(data_root, "records")
+    if not os.path.isdir(rdir):
+        return []
+    out = []
+    for fn in sorted(os.listdir(rdir)):
+        if not fn.endswith(".md"):
+            continue
+        date = ""
+        try:
+            with open(os.path.join(rdir, fn), encoding="utf-8", errors="replace") as fh:
+                for ln, line in enumerate(fh, 1):
+                    s = line.strip()
+                    if s.startswith("### "):
+                        m = DATE_RE.search(s)
+                        if m:
+                            date = m.group(1)
+                        continue
+                    if s and not s.startswith("<!--") and topic in s:
+                        out.append((date, fn + ":" + str(ln), s[:150]))
+                        if len(out) >= limit:
+                            return out
+        except OSError:
+            continue
+    return out
+
+
+def scan_turns_dated(con, topic, workspace, since, limit=60):
+    """L3 命中 -> [(date, label, text)]。"""
+    rows, _total = run_variant(con, topic, workspace, since, False, limit)
+    out = []
+    for sid, ws, date, turn, ls, le, source, score, snip in rows:
+        out.append((date or "", "会话" + sid[:8] + " turn" + str(turn),
+                    (snip or "").replace("\n", " ")[:150]))
+    return out
+
+
+def print_topic_timeline(data_root, con, topic, workspace, since):
+    """演化型查询：按主题拉全部线索，按时间升序排开（设计出处：索引规格 §3.6）。"""
+    t0 = time.time()
+    items = []
+    items.extend(scan_snapshots(data_root, topic))
+    items.extend(scan_records_dated(data_root, topic))
+    items.extend(scan_turns_dated(con, topic, workspace, since))
+    items.sort(key=lambda x: (x[0] or "9999-99-99"))
+    elapsed = round(time.time() - t0, 3)
+    print("【主题时间线】" + topic + "   共 " + str(len(items)) + " 条线索（时间升序）   "
+          + str(elapsed) + "s")
+    if not items:
+        print("  （三个来源——L2 快照 / records / 对话历史——均无命中；"
+              "可能是词不对，也可能是真没有）")
+        return 0
+    for date, label, text in items:
+        print("  " + (date or "无日期") + "  " + label + "  " + text)
+    print("")
+    print("【覆盖】三源合并（L2 快照 / records / 对话历史）；按主题**逐字匹配**——"
+          "无共同词的关联线索不会被本视图捞到。")
+    return 0
+
+
 # ---------- 对话历史（turns_fts）----------
 
 def run_variant(con, variant, workspace, since, raw, limit=200):
-    """返回 [(sid, ws, date, turn, ls, le, source, score, snip)]。"""
+    """返回 (rows, total)；rows = [(sid, ws, date, turn, ls, le, source, score, snip)]。
+
+    total = 该变体的**总命中块数**（不截断）——供【覆盖】行报告完整度。
+    """
     if len(variant) < 3:                      # 短词（多为中文双字）-> 字面兜底
         return run_like(con, variant, workspace, since, limit)
     if not raw and re.search(r"\b(AND|OR|NOT|NEAR)\b", variant):
         print("warn: 查询含 FTS5 语法关键词但未加 --raw，已按普通词拆分处理: " + variant, file=sys.stderr)
     q = variant if raw else fts_quote(variant)
-    sql = ("SELECT t.session_id, t.workspace, t.date, t.turn_no, t.src_line_start, t.src_line_end, "
-           "t.source, bm25(turns_fts, 5.0, 1.0) AS s, "
-           "snippet(turns_fts, -1, '[', ']', '…', 20) "
-           "FROM turns_fts JOIN turns t ON t.rowid = turns_fts.rowid "
-           "WHERE turns_fts MATCH ?")
+    base = ("FROM turns_fts JOIN turns t ON t.rowid = turns_fts.rowid "
+            "WHERE turns_fts MATCH ?")
     params = [q]
     if workspace:
-        sql += " AND t.workspace LIKE ?"
+        base += " AND t.workspace LIKE ?"
         params.append("%" + workspace + "%")
     if since:
-        sql += " AND (t.date = '' OR t.date >= ?)"
+        base += " AND (t.date = '' OR t.date >= ?)"
         params.append(since)
-    sql += " ORDER BY s LIMIT ?"
-    params.append(limit)
     try:
-        return con.execute(sql, params).fetchall()
+        total = con.execute("SELECT COUNT(*) " + base, params).fetchone()[0]
+        sql = ("SELECT t.session_id, t.workspace, t.date, t.turn_no, t.src_line_start, t.src_line_end, "
+               "t.source, bm25(turns_fts, 5.0, 1.0) AS s, "
+               "snippet(turns_fts, -1, '[', ']', '…', 20) " + base + " ORDER BY s LIMIT ?")
+        return con.execute(sql, params + [limit]).fetchall(), total
     except sqlite3.OperationalError as e:
         print("warn: 查询失败 [" + q + "]: " + str(e), file=sys.stderr)
-        return []
+        return [], 0
 
 
 def run_like(con, term, workspace, since, limit):
-    """短词（<3 字符，多为中文双字）字面兜底。
+    """短词（<3 字符，多为中文双字）字面兜底。返回 (rows, total)。
 
     该路径无相关性打分（score 固定 -2.0），排序按新近度 —— 盲测显示：目标几乎
-    都在候选集里，丢的只是排序（"请求"83 行、"技能"35 行，默认 limit=5 全 MISS）。
-    更贴合的做法是按命中位置/次数打分，先以最小改动（新近度）兜住可用性。
+    都在候选集里，丢的只是排序（中文双字词在默认 limit=5 下全 MISS）。
+    更贴合的做法是按命中位置 / 次数打分，先以最小改动（新近度）兜住可用性。
     """
-    sql = ("SELECT session_id, workspace, date, turn_no, src_line_start, src_line_end, source, "
-           "-2.0 AS s, "
-           "substr(COALESCE(question,'') || ' ' || COALESCE(answer,''), "
-           "max(1, instr(COALESCE(question,'') || ' ' || COALESCE(answer,''), ?) - 40), 160) "
-           "FROM turns WHERE (question LIKE ? OR answer LIKE ?)")
-    params = [term, "%" + term + "%", "%" + term + "%"]
+    where = "WHERE (question LIKE ? OR answer LIKE ?)"
+    params = ["%" + term + "%", "%" + term + "%"]
     if workspace:
-        sql += " AND workspace LIKE ?"
+        where += " AND workspace LIKE ?"
         params.append("%" + workspace + "%")
     if since:
-        sql += " AND (date = '' OR date >= ?)"
+        where += " AND (date = '' OR date >= ?)"
         params.append(since)
-    sql += " ORDER BY (date IS NULL OR date = '') ASC, date DESC, turn_no DESC LIMIT ?"
-    params.append(limit)
     try:
-        return con.execute(sql, params).fetchall()
+        total = con.execute("SELECT COUNT(*) FROM turns " + where, params).fetchone()[0]
+        sql = ("SELECT session_id, workspace, date, turn_no, src_line_start, src_line_end, source, "
+               "-2.0 AS s, "
+               "substr(COALESCE(question,'') || ' ' || COALESCE(answer,''), "
+               "max(1, instr(COALESCE(question,'') || ' ' || COALESCE(answer,''), ?) - 40), 160) "
+               "FROM turns " + where +
+               " ORDER BY (date IS NULL OR date = '') ASC, date DESC, turn_no DESC LIMIT ?")
+        return con.execute(sql, [term] + params + [limit]).fetchall(), total
     except sqlite3.OperationalError as e:
         print("warn: 字面查询失败 [" + term + "]: " + str(e), file=sys.stderr)
-        return []
+        return [], 0
 
 
 # ---------- 轨迹层（traces_fts，--deep）----------
@@ -239,7 +335,8 @@ def main():
     ap.add_argument("--deep", action="store_true", help="并查轨迹层（工具调用/输出）")
     ap.add_argument("--no-records", action="store_true", help="跳过粗记录扫描")
     ap.add_argument("--raw", action="store_true", help="查询按 FTS5 原生语法传入")
-    ap.add_argument("--timeline", action="store_true", help="时间线视图")
+    ap.add_argument("--timeline", action="store_true", help="时间线视图（按日期列会话）")
+    ap.add_argument("--topic", default="", help="主题时间线：按主题拉全部线索并按时间排开（演化型查询）")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--stats", action="store_true")
     args = ap.parse_args()
@@ -259,6 +356,11 @@ def main():
         con.close()
         return 0
 
+    if args.topic:
+        rc = print_topic_timeline(args.data, con, args.topic, args.workspace, sid_filter)
+        con.close()
+        return rc
+
     if args.timeline or not args.queries:
         rows = con.execute(
             "SELECT date, workspace, session_id, COUNT(*) FROM turns "
@@ -274,12 +376,14 @@ def main():
         return 0
 
     variants = list(args.queries)
-    results = [run_variant(con, v, args.workspace, sid_filter, args.raw) for v in variants]
+    pairs = [run_variant(con, v, args.workspace, sid_filter, args.raw) for v in variants]
     relaxed = False
-    if not any(results):
+    if not any(rows for rows, _ in pairs):
         relaxed = True
-        results = [run_variant(con, v, "", "", args.raw) for v in variants]
-    total_blocks = sum(len(r) for r in results)
+        pairs = [run_variant(con, v, "", "", args.raw) for v in variants]
+    results = [rows for rows, _ in pairs]
+    total_hits = sum(t for _, t in pairs)          # 总命中块数（不截断）
+    total_blocks = sum(len(r) for r in results)    # 本轮取回块数（受 limit 限制）
     sessions = aggregate(results, args.limit)
     rec_hits = [] if args.no_records else scan_records(args.data, variants)
     deep_hits = []
@@ -299,6 +403,10 @@ def main():
             "queries": variants, "relaxed": relaxed,
             "stats": {"blocks": total_blocks, "sessions": len(sessions),
                       "records": len(rec_hits), "traces": len(deep_hits), "elapsed_s": elapsed},
+            "coverage": {"matched_blocks": total_hits, "taken_blocks": total_blocks,
+                         "shown_sessions": len(sessions),
+                         "shown_snippets": sum(len(s["snippets"]) for s in sessions),
+                         "records_shown": len(rec_hits)},
             "records": [{"file": f, "line": l, "text": t} for f, l, t in rec_hits],
             "sessions": sessions,
             "deep": [{"session_id": r[0], "seq": r[1], "kind": r[2], "src_line": r[3], "text": r[5]}
@@ -329,6 +437,13 @@ def main():
         for sid, seq, kind, src, score, snip in deep_hits[:6]:
             print("  [" + kind + "] " + sid[:8] + " seq=" + str(seq) + " 行" + str(src))
             print("      " + (snip or "").replace("\n", " ")[:170])
+    shown_snips = sum(len(s["snippets"]) for s in sessions)
+    print("")
+    print("【覆盖】历史命中 " + str(total_hits) + " 块 / 本轮取回 " + str(total_blocks)
+          + " 块 -> 展示 " + str(len(sessions)) + " 会话 / " + str(shown_snips) + " 片段"
+          + "；records " + str(len(rec_hits)) + " 行（上限 6）")
+    print("  未展示不等于不存在：程序按相关性截断。要完整线索，用 --topic <主题> 拉时间线，"
+          "或收窄查询（加词 / --workspace / --since）。")
     short = [q for q in variants if len(q) < 3]
     if short:
         print("")

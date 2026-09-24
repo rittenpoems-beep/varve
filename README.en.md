@@ -117,6 +117,7 @@ After that, every session start automatically **loads the project state** and **
 python -X utf8 scripts\session-digest.py          # session logs -> SQLite
 python -X utf8 scripts\build-search-index.py      # build the FTS5 index
 python -X utf8 scripts\recall.py "keyword1" "keyword2"   # retrieval, coarse to fine
+python -X utf8 scripts\recall.py --topic "snapshots"   # topic timeline (evolution-type; three sources merged)
 python -X utf8 scripts\recall.py --timeline --since 14d
 python -X utf8 scripts\recall.py "error text" --deep     # include tool-call/output layer
 ```
@@ -130,7 +131,7 @@ python -X utf8 scripts\recall.py "error text" --deep     # include tool-call/out
 | `check-env.py` | Probe Python / SQLite / FTS5 / trigram support |
 | `session-digest.py` | Session logs -> SQLite (conversation history + trace history) |
 | `build-search-index.py` | Build the FTS5 index (skips when content is unchanged) |
-| `recall.py` | Retrieval CLI: records -> conversation history -> trace layer (`--deep`) |
+| `recall.py` | Retrieval CLI: records -> conversation history -> trace layer (`--deep`); `--topic` = topic timeline; output ends with a coverage line |
 | `audit.py` | Memory-store audit: consistency / duplicates / index freshness / retrieval self-test / size |
 | `env-scan.py` | Environment scan: records only what the harness does *not* inject, refreshes the auto section of `ENVIRONMENT.md` |
 | `hook-session-start.py` | Session start: mark pending injection (zero output) |
@@ -183,6 +184,11 @@ Three-stage funnel: records -> conversation history -> trace layer
 - Windows / PowerShell first; the Python side is cross-platform.
 - **The state card is global**: projects are not isolated; multi-project task state shares one card (distinguished by a `[project]` prefix). This is a deliberate trade-off for cross-framework usability.
 - **Global hooks require one manual approval**: after `~/.codex/hooks.json` changes, Codex asks you to trust it again.
+- **Clue stitching is only partly solved (honest note, 2026-09-25)**: `--topic` and keyword search both match **literally**.
+  Two clues with no shared word (e.g. one says "in Beijing", another says "ate in Shanghai") never land in the same view —
+  so their conflict cannot be detected. A semantic index (phase 2) or entity anchors are the candidate directions, but at
+  this system's scale the author is still weighing cost against benefit: **the current "anchor-first + coverage self-report"
+  is a stopgap, not a final answer.**
 
 ## Feedback & contributing
 
