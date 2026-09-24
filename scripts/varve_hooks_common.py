@@ -3,6 +3,7 @@
 """varve_hooks_common.py — Varve 两个 hook 的共享逻辑（状态渲染 / pending / staging 提示）。
 
 2026-09-23：L2 注入拆分为"判定"（SessionStart 写 pending）与"注入"（UserPromptSubmit 追加）。
+2026-09-25：L2 改**快照流** —— `render_status()` 只渲染文件末尾那条完整快照（旧格式自动降级）。
 """
 import json
 import os
@@ -14,6 +15,8 @@ PENDING_DIR = os.path.join(DATA_ROOT, "pending")
 GLOBAL_STATUS = os.path.join(DATA_ROOT, "STATUS.md")
 LIMIT = 3500
 SECTION_RE = re.compile(r"<!-- =+ 工程状态区.*?<!-- =+ 工程状态区 结束.*?-->", re.DOTALL)
+# 快照流（2026-09-25 用户定稿）：L2 = 一串只增不减的完整快照，注入只取最后一条。
+SNAPSHOT_MARK = "<!-- ===== 快照 ===== -->"
 
 
 def find_status(cwd=None):
@@ -25,8 +28,20 @@ def find_status(cwd=None):
     return GLOBAL_STATUS if os.path.exists(GLOBAL_STATUS) else None
 
 
+def extract_latest_snapshot(text):
+    """取最后一条快照（快照流格式）。找不到返回空串（调用方降级到旧格式）。
+
+    快照流：文件由若干条 `SNAPSHOT_MARK` 分隔的完整快照组成，只增不减；
+    注入只取最后一条 —— 上下文占用恒定，与历史长度无关。
+    """
+    idx = text.rfind(SNAPSHOT_MARK)
+    if idx < 0:
+        return ""
+    return text[idx + len(SNAPSHOT_MARK):].strip()
+
+
 def render_status(cwd):
-    """读全局卡的工程状态区（截断）。"""
+    """读全局卡：优先取**最后一条快照**；旧格式（整区）降级兼容。"""
     status = find_status(cwd)
     if not status:
         return ""
@@ -35,13 +50,20 @@ def render_status(cwd):
             text = fh.read()
     except OSError:
         return ""
-    m = SECTION_RE.search(text)
-    if not m:
-        return ""
-    seg = m.group(0)
-    if len(seg) > LIMIT:
-        seg = seg[:LIMIT] + "\n...(已截断)"
-    return "【记忆系统 · 全局工程状态（追加注入）】\n\n" + seg + "\n"
+    seg = extract_latest_snapshot(text)
+    if seg:
+        head = "【记忆系统 · 全局工程状态 · 最新快照（追加注入）】"
+        if len(seg) > LIMIT:
+            seg = seg[:LIMIT] + "\n...(单条快照 > " + str(LIMIT) + " 字符，已截断；请精简当前状态)"
+    else:
+        m = SECTION_RE.search(text)
+        if not m:
+            return ""
+        seg = m.group(0)
+        head = "【记忆系统 · 全局工程状态（追加注入）】"
+        if len(seg) > LIMIT:
+            seg = seg[:LIMIT] + "\n...(已截断)"
+    return head + "\n\n" + seg + "\n"
 
 
 def contract_hint():

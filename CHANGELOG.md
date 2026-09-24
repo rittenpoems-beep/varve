@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **L2 is now an append-only snapshot stream** (2026-09-25). The global state card is no longer a document that
+  gets rewritten in place: every update appends a *complete, self-contained snapshot*, and the hook injects only
+  the **newest** one. Context cost is therefore constant no matter how long the history grows, and older
+  snapshots are never modified, so any past state can be reconstructed. A task that ends is marked once in the
+  snapshot where it ended, instead of being collected into a rolling "recently completed" list.
+  This fixes two real failure modes of the previous model: a growing card was truncated **head-first**, dropping
+  the *newest* content (measured 2026-09-25 on a real card: 4107 characters against the 3500 guard), and items
+  rolled off the "recently completed" list were lost permanently.
+
+### Added
+
+- `scripts/migrate-status-snapshots.py` — converts a legacy five-section state card into the first snapshot
+  (idempotent, auto-backup, supports `--dry-run`).
+- `render_status()` falls back to the legacy whole-section rendering when no snapshot marker is present, so
+  existing cards keep working without migration.
+
 ## [0.1.1] - 2026-09-24
 
 ### Added

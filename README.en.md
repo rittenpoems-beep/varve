@@ -4,7 +4,7 @@
 
 **English** | [简体中文](README.md)
 
-**A cross-session memory layer for AI coding agents** (Codex first, framework-agnostic by design) — three tiers (environment / state / history), **append-only injection** that never breaks the prompt cache, **SQLite full-text search**, and a **single global state card** shared across workspaces.
+**A cross-session memory layer for AI coding agents** (Codex first, framework-agnostic by design) — three tiers (environment / state / history), **append-only injection** that never breaks the prompt cache, **SQLite full-text search**, and a **single global state card** shared across workspaces, kept as an **append-only snapshot stream**.
 
 Zero LLM calls. Zero third-party dependencies (Python standard library + PowerShell 7).
 
@@ -28,7 +28,7 @@ Zero LLM calls. Zero third-party dependencies (Python standard library + PowerSh
 | Problem | Common approach | What Varve does |
 |---|---|---|
 | Every new session starts amnesiac | Paste context by hand | Three tiers available automatically: environment / state / history |
-| Dumping all history into context | Tens of thousands of tokens per turn | Inject only a small state card; retrieve details on demand |
+| Dumping all history into context | Tens of thousands of tokens per turn | Inject only the **newest** state snapshot; retrieve details on demand |
 | Injection shatters the prompt cache | Silent cost explosion | **State is appended at the tail of the request**, never touching the fixed prefix |
 | Finding history means guessing keywords | Brute-force `rg` | SQLite FTS5 index + multi-variant retrieval + **source line coordinates** |
 | Concurrent writers clobber a file | Whole-file rewrite | Staging: proposal → arbitration → atomic commit |
@@ -92,7 +92,7 @@ The two contracts are **nearly identical** — event names, stdin payload fields
 - Requirements: Python 3.10+
 - Install: `pwsh -NoProfile -File scripts\install-claude.ps1` (writes user-level `~/.claude/settings.json`; `-Scope project -Project <dir>` for a single repo)
 - Manual step: none (settings.json has no trust flow)
-- Limit: `additionalContext` is capped at 10,000 characters (current state card is about 2.5k, safe)
+- Limit: `additionalContext` is capped at 10,000 characters (the newest snapshot is about 1.3k, safe)
 - Status: state injection is implemented and verified with simulated payloads; **history search is not supported yet** — the Claude Code transcript format is unverified, so first run `python -X utf8 scripts\probe-claude-transcript.py` on a machine with Claude Code to sample it
 
 ## Quick start
@@ -164,6 +164,8 @@ Three-stage funnel: records -> conversation history -> trace layer
 2. **Graceful degradation** — every stage has a fallback; worst case = plain files plus a rule sentence.
 
 **Global card (since 2026-09-24)**: there is exactly one state card — `<VARVE_DATA>\STATUS.md`. It is not scoped to a project or a directory; every session, in any framework, injects the same card (ownership is expressed with a `[project]` prefix inside entries). Trade-offs are listed under Known limitations.
+
+**Snapshot stream (since 2026-09-25)**: the global card is an **append-only sequence of complete snapshots** — every update appends one self-contained snapshot at the end, and injection reads only the **last** one. Context cost stays constant regardless of history length, and older snapshots are never edited, so any past state can be reconstructed. A single snapshot stays under the 3500-character guard (checked by `audit.py`); legacy cards are still read via a fallback path, and `scripts/migrate-status-snapshots.py` converts them.
 
 **Index consistency**: `turns` / `traces` use **stable sequential ids** (assigned on write, unchanged by delete-and-reinsert) and stay **in sync with the FTS5 index through SQLite triggers** — there is no window where content is updated but the index is stale, and no full rebuild is required.
 

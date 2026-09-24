@@ -8,6 +8,7 @@
   C 索引新鲜度：index_built_at 是否落后于 content_updated_at
   D 检索自检：从库内抽样记录反查自身，验证 FTS 通路可用
   E 体量概览：库大小 / turns / traces / 最长文本
+  F L2 体积：**最新一条快照**是否贴住 3500 护栏（快照流下文件总长不设上限）
 
 用法：python -X utf8 audit.py [--data <dir>] [--json]
 退出码：0 = 全部通过；1 = 发现问题
@@ -22,6 +23,13 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 DEFAULT_DATA = os.environ.get("VARVE_DATA") or os.path.join(os.path.expanduser("~"), ".varve")
+# 快照流标记（与 scripts/varve_hooks_common.py 同源；此处保留兜底定义避免跨模块硬依赖）
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import varve_hooks_common as _C
+    SNAPSHOT_MARK = _C.SNAPSHOT_MARK
+except Exception:
+    SNAPSHOT_MARK = "<!-- ===== 快照 ===== -->"
 
 
 def main():
@@ -111,15 +119,21 @@ def main():
     report["E_size"] = {"db_mb": round(os.path.getsize(db) / 1e6, 1), "turns": t_cnt, "traces": r_cnt}
     con.close()
 
-    # F. L2 体积（防注入膨胀：滚动窗口应保持有界）
+    # F. L2 体积（快照流：只查**最后一条快照**是否贴住护栏；文件总长不设上限）
     l2 = os.path.join(args.data, "STATUS.md")
     if os.path.exists(l2):
         txt = open(l2, encoding="utf-8", errors="replace").read()
-        m = re.search(r"<!-- =+ 工程状态区.*?<!-- =+ 工程状态区 结束", txt, re.DOTALL)
-        seg = m.group(0) if m else txt
-        report["F_l2"] = {"chars": len(seg), "budget": 3500}
+        idx = txt.rfind(SNAPSHOT_MARK)
+        if idx >= 0:
+            seg = txt[idx + len(SNAPSHOT_MARK):].strip()
+            scope, n_snap = "最新快照", txt.count(SNAPSHOT_MARK)
+        else:
+            m = re.search(r"<!-- =+ 工程状态区.*?<!-- =+ 工程状态区 结束", txt, re.DOTALL)
+            seg = m.group(0) if m else txt
+            scope, n_snap = "旧格式整区", 0
+        report["F_l2"] = {"chars": len(seg), "budget": 3500, "scope": scope, "snapshots": n_snap}
         if len(seg) > 3500:
-            issues.append("F: 全局卡工程状态区 %d 字符 > 预算 3500（注入会被截断；细节移进 records）" % len(seg))
+            issues.append("F: %s %d 字符 > 预算 3500（注入会被截断；细节移进 records）" % (scope, len(seg)))
     else:
         report["F_l2"] = {"chars": 0, "budget": 3500, "note": "全局卡不存在"}
 
@@ -137,7 +151,9 @@ def main():
         print("  D 检索自检: %d/%d 命中" % (hit, len(rows)))
         print("  E 体量: %.1f MB | turns=%d traces=%d"
               % (report["E_size"]["db_mb"], report["E_size"]["turns"], report["E_size"]["traces"]))
-        print("  F 全局卡: %d 字符 / 预算 %d" % (report["F_l2"]["chars"], report["F_l2"]["budget"]))
+        f2 = report["F_l2"]
+        print("  F 全局卡: %s %d 字符 / 预算 %d（共快照 %d 条）"
+              % (f2.get("scope", "-"), f2["chars"], f2["budget"], f2.get("snapshots", 0)))
         print("")
         if issues:
             print("发现 %d 个问题：" % len(issues))

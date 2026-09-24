@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""hook-user-prompt.py — UserPromptSubmit：① 消费 pending（L2 状态**追加注入**）② 历史信号提醒。
+"""hook-user-prompt.py — UserPromptSubmit：① 消费 pending（L2 **最新快照**追加注入）② 历史信号提醒。
 
 2026-09-23 定稿：
 - 判定/注入拆开：SessionStart 只写 pending；本 hook 把状态区**追加**在当前请求尾部
