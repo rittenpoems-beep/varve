@@ -17,6 +17,83 @@ LIMIT = 3500
 SECTION_RE = re.compile(r"<!-- =+ 工程状态区.*?<!-- =+ 工程状态区 结束.*?-->", re.DOTALL)
 # 快照流（2026-09-25 用户定稿）：L2 = 一串只增不减的完整快照，注入只取最后一条。
 SNAPSHOT_MARK = "<!-- ===== 快照 ===== -->"
+BACKTICK_RUN_RE = re.compile(r"`+")
+FENCE_RE = re.compile(r"(?m)^\s*(`{3,}|~{3,})")
+
+
+def _inline_code_spans(text):
+    """行内代码区间：按**等长反引号**配对（CommonMark 规则）。
+
+    旧实现用贪婪的 `` `+[^`\\n]*`+ ``：遇到双反引号包裹含反引号的内容
+    （`` `` `X` `` ``）时，开头两个反引号被当成一对，闭合位置算错，
+    夹在里面的快照标记就"逃出"代码区被判成真快照（2026-09-26 回归用例抓到）。
+    逐行配对，且只与**等长**的反引号串配对：不成对的孤立反引号不会吞掉后续正文。
+    """
+    spans = []
+    base = 0
+    for line in text.splitlines(True):
+        runs = [m for m in BACKTICK_RUN_RE.finditer(line)]
+        i = 0
+        while i < len(runs):
+            n = len(runs[i].group(0))
+            j = i + 1
+            while j < len(runs) and len(runs[j].group(0)) != n:
+                j += 1
+            if j >= len(runs):
+                i += 1
+                continue
+            spans.append((base + runs[i].start(), base + runs[j].end()))
+            i = j + 1
+        base += len(line)
+    return spans
+
+
+def _fence_spans(text):
+    """围栏代码块区间：闭合围栏必须与开启围栏**同为一种字符、且不短于它**（CommonMark）。
+
+    两处都是 2026-09-26 复核补的：
+      * 旧实现只认反引号、且按出现顺序奇偶配对 —— 文档里用 ~~~ 围栏展示标记示例时，
+        示例照样被当成真快照（FIX-021 同类问题在波浪线围栏下原样复现）。
+      * 只比字符不比长度时，```` 四反引号块里嵌的 ``` 三反引号行会**提前闭合**围栏，
+        其后的示例标记就漏成了"真快照"。CommonMark 要求闭合围栏不短于开启围栏。
+    """
+    spans = []
+    opened = None                             # (围栏行起始位置, 围栏字符, 长度)
+    for m in FENCE_RE.finditer(text):
+        ch, n = m.group(1)[0], len(m.group(1))
+        if opened is None:
+            opened = (m.start(), ch, n)
+        elif ch == opened[1] and n >= opened[2]:
+            spans.append((opened[0], m.end()))
+            opened = None
+    if opened is not None:                    # 未闭合的围栏：其后全部视为代码
+        spans.append((opened[0], len(text)))
+    return spans
+
+
+def code_spans(text):
+    """返回文档里"代码区"的字符区间：围栏代码块 + 行内代码。
+
+    为什么要区分：模板 / 文档里为了**教人怎么写**，必须原样展示快照标记本身。
+    旧实现用 text.rfind(SNAPSHOT_MARK) 一把梭，会把文档里示例的标记当成真快照 ——
+    新装用户拿到的注入内容是模板的说明文字，而不是状态（2026-09-26 实测复现）。
+    """
+    code = _fence_spans(text)
+    code.extend(_inline_code_spans(text))
+    return code
+
+
+def snapshot_marks(text):
+    """所有**不在代码区里**的快照标记位置（升序）。
+
+    代码区里的标记只是文档示例，不是真快照。
+    """
+    code = code_spans(text)
+    out = []
+    for m in re.finditer(re.escape(SNAPSHOT_MARK), text):
+        if not any(s <= m.start() < e for s, e in code):
+            out.append(m.start())
+    return out
 
 
 def find_status(cwd=None):
@@ -29,15 +106,16 @@ def find_status(cwd=None):
 
 
 def extract_latest_snapshot(text):
-    """取最后一条快照（快照流格式）。找不到返回空串（调用方降级到旧格式）。
+    """取最后一条**真**快照（快照流格式）。找不到返回空串（调用方降级到旧格式）。
 
     快照流：文件由若干条 `SNAPSHOT_MARK` 分隔的完整快照组成，只增不减；
     注入只取最后一条 —— 上下文占用恒定，与历史长度无关。
+    代码区（围栏块 / 行内代码）里的标记是文档示例，不算快照。
     """
-    idx = text.rfind(SNAPSHOT_MARK)
-    if idx < 0:
+    marks = snapshot_marks(text)
+    if not marks:
         return ""
-    return text[idx + len(SNAPSHOT_MARK):].strip()
+    return text[marks[-1] + len(SNAPSHOT_MARK):].strip()
 
 
 def render_status(cwd):

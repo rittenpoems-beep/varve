@@ -96,7 +96,7 @@ def main():
                 print("turns/traces 表不存在 —— 先跑 session-digest.py (" + msg + ")")
             con.close()
             return 1
-        sz = round(os.path.getsize(db) / 1024.0 / 1024.0, 1)
+        sz = round(os.path.getsize(db) / 1e6, 1)   # 与 audit.py 统一口径：MB = 10^6 字节
         print("turns=" + str(t) + " traces=" + str(r) + " db_mb=" + str(sz) + " path=" + db)
         con.close()
         return 0
@@ -156,6 +156,18 @@ def main():
     if stamp:
         con.execute("INSERT OR REPLACE INTO meta VALUES ('index_built_at', ?)", (stamp[0],))
     con.commit()
+
+    # rebuild 会把**旧索引的整块页面**丢掉：新索引能原样吃回去多少，取决于它多大。
+    # 重建后内容变少时（删轮次、修坏索引）新索引只要一小部分页，剩下的仍留在文件里
+    # ——文件停在被撑大的尺寸上（2026-09-26 实测：内容 95 MB 的库跑完 --full + --force
+    # 后文件 152.4 MB，其中 13833 页空闲；VACUUM 后回到 95.4 MB。夹具上删掉 3/4 轮次
+    # 再 --force：不 VACUUM 留 88 页空闲 = 55%）。--force 是显式的"重建全部"动作，
+    # 顺手回收，与 session-digest.py 在结构升级后 VACUUM 的既有做法一致。
+    # 失败（磁盘空间不足 / 被占用）不算错误 —— 索引本身已经建好了。
+    try:
+        con.execute("VACUUM")
+    except sqlite3.Error as e:
+        print("warn: VACUUM 未完成（索引已重建，仅体积未回收）: " + str(e))
 
     t = con.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
     r = con.execute("SELECT COUNT(*) FROM traces").fetchone()[0]

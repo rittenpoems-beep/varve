@@ -10,7 +10,7 @@ Zero LLM calls. Zero third-party dependencies (Python standard library + PowerSh
 
 > The name comes from geology: a **varve** is an annual sediment layer in a glacial lake — one layer per year, stacked, never rewritten, traceable back to any layer. That is exactly its three principles: **append-only, rebuildable, addressable**.
 
-> Status: early but usable (v0.1). In daily use on a real project; the index layer ships with an audit tool and regression cases (see [FIXES.md](FIXES.md), in Chinese).
+> Status: early but usable (v0.2). In daily use on a real project; the index layer ships with an audit tool (`audit.py`) and an **executable** regression suite (`scripts/regression_test.py`; the ledger is [FIXES.md](FIXES.md), in Chinese).
 
 ## Contents
 
@@ -36,16 +36,16 @@ Zero LLM calls. Zero third-party dependencies (Python standard library + PowerSh
 
 ## Real-world scale
 
-These are not illustrative numbers — they come from 8 days of continuous use in the author's own environment:
+These are not illustrative numbers — they come from continuous use in the author's own environment (index size, database size and audit result re-measured on 2026-09-26; the store keeps growing with use):
 
 | Metric | Value |
 |---|---|
 | Session requests | 4,539 |
 | Cumulative input tokens | ≈ 1.4 billion |
 | Cache hit rate | 96% (a direct beneficiary of tail-append injection) |
-| Index size | 549 conversation turns · 20,738 trace records |
-| Database size | 82.5 MB (local SQLite, rebuildable at any time) |
-| Audit result | `audit.py` all PASS (0 orphans · 0 duplicates · 6/6 sync triggers) |
+| Index size | 630 conversation turns · 23,988 trace records |
+| Database size | 97.6 MB (local SQLite, rebuildable at any time) |
+| Audit result | `audit.py` all PASS (0 orphans · 0 duplicate re-ingestions · 6/6 sync triggers · token-level integrity ok) |
 
 That workload is exactly the target scenario: one developer pushing several projects at once, hundreds of agent turns per day.
 
@@ -84,7 +84,7 @@ The two contracts are **nearly identical** — event names, stdin payload fields
 **Codex**
 
 - Requirements: Windows + PowerShell 7 + Python 3.10+ (stdlib with SQLite FTS5)
-- Install: `pwsh -NoProfile -File scripts\install.ps1 -Project <your-project>`
+- Install: `pwsh -NoProfile -File scripts\install.ps1` (writes **user-level** `~/.codex/hooks.json`, effective for every workspace; add `-Scope project -Project <dir>` for a single project)
 - Manual step: approve the hooks once in the Codex UI
 
 **Claude Code**
@@ -92,7 +92,7 @@ The two contracts are **nearly identical** — event names, stdin payload fields
 - Requirements: Python 3.10+
 - Install: `pwsh -NoProfile -File scripts\install-claude.ps1` (writes user-level `~/.claude/settings.json`; `-Scope project -Project <dir>` for a single repo)
 - Manual step: none (settings.json has no trust flow)
-- Limit: `additionalContext` is capped at 10,000 characters (the newest snapshot is about 1.3k, safe)
+- Limit: `additionalContext` is capped at 10,000 characters; only the **last** snapshot is injected and it is held under a 3,500-character guard (checked by `audit.py`)
 - Status: state injection is implemented and verified with simulated payloads; **history search is not supported yet** — the Claude Code transcript format is unverified, so first run `python -X utf8 scripts\probe-claude-transcript.py` on a machine with Claude Code to sample it
 
 ## Quick start
@@ -100,16 +100,16 @@ The two contracts are **nearly identical** — event names, stdin payload fields
 **Requirements**: Windows + PowerShell 7 + Python 3.10+ (stdlib build with SQLite FTS5).
 
 ```powershell
-# 1. Install: env check -> data dir -> generate .codex/hooks.json -> install Skill
-pwsh -NoProfile -File scripts\install.ps1 -Project D:\your-project
+# 1. Install: env check -> data dir -> generate .codex/hooks.json -> install Skill (user scope by default)
+pwsh -NoProfile -File scripts\install.ps1
 
 # 2. Approve the hooks once in Codex ("New hook - review required", the only manual step)
 
-# 3. Verify (13 checks)
-pwsh -NoProfile -File scripts\doctor.ps1 -Project D:\your-project
+# 3. Verify (exit code 0 when every check passes; add -Project <dir> to also check project-level hooks)
+pwsh -NoProfile -File scripts\doctor.ps1
 ```
 
-After that, every session start automatically **loads the project state** and **refreshes the search index**; when you mention "last time / earlier / that pitfall", you get a one-line retrieval reminder.
+After that, every session start automatically **loads the project state** and **keeps the search index current** (with sync triggers active, writes land in the index immediately — no rebuild needed); when you mention "last time / earlier / that pitfall", you get a one-line retrieval reminder.
 
 **Without hooks** you can still use the pipeline directly:
 
@@ -120,6 +120,8 @@ python -X utf8 scripts\recall.py "keyword1" "keyword2"   # retrieval, coarse to 
 python -X utf8 scripts\recall.py --topic "snapshots"   # topic timeline (evolution-type; three sources merged)
 python -X utf8 scripts\recall.py --timeline --since 14d
 python -X utf8 scripts\recall.py "error text" --deep     # include tool-call/output layer
+python -X utf8 scripts\recall.py "a OR b" --raw       # --raw: pass the string as native FTS5 syntax
+python -X utf8 scripts\regression_test.py             # regression cases (temp dirs, never touches real data)
 ```
 
 ## Tools
@@ -127,12 +129,13 @@ python -X utf8 scripts\recall.py "error text" --deep     # include tool-call/out
 | Content | Description |
 |---|---|
 | `install.ps1` | Install: env check / data dir / hooks.json / Skill (idempotent) |
-| `doctor.ps1` | 13-point health check (read-only) |
+| `doctor.ps1` | Health check (read-only; exit code 0 when everything passes) |
 | `check-env.py` | Probe Python / SQLite / FTS5 / trigram support |
-| `session-digest.py` | Session logs -> SQLite (conversation history + trace history) |
-| `build-search-index.py` | Build the FTS5 index (skips when content is unchanged) |
-| `recall.py` | Retrieval CLI: records -> conversation history -> trace layer (`--deep`); `--topic` = topic timeline; output ends with a coverage line |
-| `audit.py` | Memory-store audit: consistency / duplicates / index freshness / retrieval self-test / size |
+| `session-digest.py` | Session logs -> SQLite (conversation history + trace history); cross-process lock, skips the round if it cannot acquire it |
+| `build-search-index.py` | Build the FTS5 index (with sync triggers active there is nothing to rebuild; `--force` rebuilds explicitly) |
+| `recall.py` | Retrieval CLI: records -> conversation history -> trace layer (`--deep`); `--topic` = topic timeline; `--raw` = native FTS5 syntax; output ends with a coverage line |
+| `audit.py` | Memory-store audit: consistency / duplicates / index consistency (with `--fix`) / retrieval self-test / size. `--fix` re-ingests from `--sessions`, which **must be the directory the store was built from** (`session-digest.py` records it in `meta.sessions_root`); a wrong directory is refused outright. Internally it uses `--keep-orphans` (rather keep stale rows than risk treating a missing directory as a deletion order), so when the session logs have moved it only rebuilds the index and says plainly that no content was re-ingested |
+| `regression_test.py` | Regression cases: the executable form of every "how to check for regression" recipe in FIXES.md |
 | `env-scan.py` | Environment scan: records only what the harness does *not* inject, refreshes the auto section of `ENVIRONMENT.md` |
 | `hook-session-start.py` | Session start: mark pending injection (zero output) |
 | `hook-user-prompt.py` | User message: append state card + history-signal reminder |
@@ -175,11 +178,16 @@ Three-stage funnel: records -> conversation history -> trace layer
 - Everything stays local: session logs (`~/.codex/sessions/`) are opened **read-only**; the derived SQLite database and state card live under `<VARVE_DATA>` and are never uploaded.
 - The database is **rebuildable**: delete `<VARVE_DATA>/index/` and rerun `session-digest.py` + `build-search-index.py`.
 - Retrieval is **local full-text matching** (SQLite FTS5) — no embeddings, no external API calls.
+- ⚠️ **The database is a plain-text copy of session content** — prompts, answers, tool calls and their output are
+  stored verbatim, **with no redaction**. If a secret or token ever appeared in a session, it is in the database
+  too. Do not sync the database or the state card to a public repo or cloud drive.
 - If you share this setup with a team, note that `<VARVE_DATA>/STATUS.md` contains your task state — keep it out of public repos (e.g. `.gitignore`).
 
 ## Known limitations
 
-- **Codex-only today** (via `.codex/hooks.json` + two hooks). The architecture is layered for portability, but **no other framework adapter exists yet**.
+- **Adapter progress differs by framework**: Codex is tested end to end (`.codex/hooks.json` + two hooks);
+  Claude Code's state injection is verified at script level (see above) but **history search is not adapted yet**
+  (its transcript format has not been sampled). No other framework adapter exists.
 - Depends on Codex's session log format (`~/.codex/sessions/**/*.jsonl`).
 - Windows / PowerShell first; the Python side is cross-platform.
 - **The state card is global**: projects are not isolated; multi-project task state shares one card (distinguished by a `[project]` prefix). This is a deliberate trade-off for cross-framework usability.

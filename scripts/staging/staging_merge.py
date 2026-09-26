@@ -10,6 +10,11 @@
 降级兜底：--scan --auto-target <file> 可生成"机械计划"（无冲突项直接追加到指定文件），
 供主 agent 缺席时使用（宁可重复，不可丢）。
 
+并发（2026-09-26 修，见 FIXES.md FIX-019）：--plan 是"读-改-写"（目标文件 + .merged.json
+两处），两个提交者并发会丢更新：① 同一目标文件各读旧值 → 一方 append 被另一方覆盖；
+② .merged.json 各读旧表 → 对方的 plan_id 记录丢失 → 同一计划下次被执行第二遍。
+现在整个 do_plan 走跨进程互斥（MergeLock），并发提交串行化。
+
 用法:
   python -X utf8 staging_merge.py --scan [--out plan.json]
   python -X utf8 staging_merge.py --scan --auto-target <文件> --out plan.json
@@ -20,15 +25,70 @@ import glob
 import hashlib
 import json
 import os
+import sys
+import time
 import uuid
 from datetime import datetime, timezone
 
 DEFAULT_DATA = os.environ.get("VARVE_DATA") or os.path.join(os.path.expanduser("~"), ".varve")
 
 
+class MergeLock:
+    """执行层跨进程互斥：O_EXCL 建锁文件，mtime 超时可抢占（上次被 kill 的死锁）。
+
+    拿不到锁就**放弃本轮**（不排队硬上）——提交是显式动作，调用方可以重跑；
+    宁可不做，也不做一半。stale 默认 900s。
+    """
+
+    def __init__(self, path, wait=30.0, stale=900.0):
+        self.path = path
+        self.wait = wait
+        self.stale = stale
+        self.fd = None
+
+    def acquire(self):
+        deadline = time.time() + self.wait
+        while True:
+            try:
+                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self.fd, ("%d %s\n" % (os.getpid(), datetime.now(timezone.utc)
+                                                .strftime("%Y-%m-%dT%H:%M:%SZ"))).encode("utf-8"))
+                return True
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(self.path) > self.stale:
+                        os.remove(self.path)
+                        continue
+                except OSError:
+                    pass
+                if time.time() >= deadline:
+                    return False
+                time.sleep(0.2)
+            except OSError:
+                return True          # 建不了锁文件（权限等）：降级为无锁，不阻塞提交
+
+    def release(self):
+        if self.fd is None:
+            return
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+        self.fd = None
+
+
 def load_proposals(data):
+    """收集全部未归档提案。返回 (rows, bad_paths)。
+
+    解析失败的文件**必须上报**：旧实现 `except: continue` 让它彻底隐身 ——
+    既不被合并也不被归档，写者以为交了、读者永远看不到（静默丢数据）。
+    """
     staging = os.path.join(data, "staging")
-    rows = []
+    rows, bad = [], []
     for wdir in sorted(glob.glob(os.path.join(staging, "*"))):
         if not os.path.isdir(wdir):
             continue
@@ -40,15 +100,16 @@ def load_proposals(data):
                 with open(p, encoding="utf-8") as fh:
                     rec = json.load(fh)
             except Exception:
+                bad.append(p)
                 continue
             rec["_path"] = p
             rows.append(rec)
     rows.sort(key=lambda r: (r.get("ts", ""), r.get("writer_id", ""), r.get("proposal_id", "")))
-    return rows
+    return rows, bad
 
 
 def scan(data):
-    rows = load_proposals(data)
+    rows, bad = load_proposals(data)
     seen = set()
     unique = []
     duplicates = 0
@@ -79,7 +140,7 @@ def scan(data):
                     for i in items
                 ],
             })
-    return rows, unique, duplicates, clean, conflicts
+    return rows, unique, duplicates, clean, conflicts, bad
 
 
 def atomic_append(path, text):
@@ -108,12 +169,13 @@ def archive(path, data):
 
 
 def do_scan(args):
-    rows, unique, dup, clean, conflicts = scan(args.data)
+    rows, unique, dup, clean, conflicts, bad = scan(args.data)
     report = {
         "scanned_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "total": len(rows),
         "unique": len(unique),
         "duplicates": dup,
+        "unreadable": bad,
         "clean": [
             {"target": r.get("target"), "op": r.get("op"), "key": r.get("key"),
              "content": r.get("content"), "writer_id": r.get("writer_id"),
@@ -124,27 +186,43 @@ def do_scan(args):
     }
     print("total=" + str(len(rows)) + " unique=" + str(len(unique)) +
           " duplicates=" + str(dup) + " clean=" + str(len(clean)) + " conflicts=" + str(len(conflicts)))
+    if bad:
+        print("[!] " + str(len(bad)) + " 个提案文件无法解析（既不会合并也不会归档，"
+              "需人工处理）：" + ", ".join(os.path.basename(p) for p in bad[:5]), file=sys.stderr)
 
     if args.auto_target:
-        lines = []
+        lines, consumed, coerced = [], [], 0
         for r in clean:
-            if r.get("op") == "append":
-                lines.append("- [" + r.get("ts", "") + "] " + r.get("content", "") + "\n")
+            op = r.get("op")
+            if op not in ("append", "upsert"):
+                continue
+            # upsert 在机械兜底下**没有 key 定位能力**（没有语义层判断该改哪一行），
+            # 只能降级成追加并打标。旧实现直接 continue 丢掉 —— 静默丢数据（2026-09-26 修）。
+            mark = ""
+            if op == "upsert":
+                coerced += 1
+                mark = "（upsert:" + str(r.get("key", "")) + "，机械兜底按追加处理，需人工去重）"
+            lines.append("- [" + r.get("ts", "") + "] " + r.get("content", "") + mark + "\n")
+            consumed.append(r["_path"])
         plan = {
             "plan_id": uuid.uuid4().hex[:12],
             "mode": "mechanical-fallback",
             "writes": ([{"path": args.auto_target, "op": "append", "text": "".join(lines)}]
                        if lines else []),
-            "consumed": [r["_path"] for r in clean if r.get("op") == "append"],
+            "consumed": consumed,
         }
         with open(args.out, "w", encoding="utf-8") as fh:
             json.dump(plan, fh, ensure_ascii=False, indent=2)
         print("auto_plan=" + args.out + " writes=" + str(len(plan["writes"])) +
               " consumed=" + str(len(plan["consumed"])))
+        if coerced:
+            print("[!] " + str(coerced) + " 条 upsert 无 key 定位能力，已降级为追加并打标"
+                  "（宁可重复，不可丢）", file=sys.stderr)
     else:
         with open(args.out, "w", encoding="utf-8") as fh:
             json.dump(report, fh, ensure_ascii=False, indent=2)
         print("report=" + args.out)
+    return 0
 
 
 def do_plan(args):
@@ -152,34 +230,43 @@ def do_plan(args):
         plan = json.load(fh)
     pid = plan.get("plan_id") or hashlib.sha256(
         json.dumps(plan, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
-    state_path = os.path.join(args.data, "staging", ".merged.json")
-    state = {"applied_plans": []}
-    if os.path.exists(state_path):
-        try:
-            with open(state_path, encoding="utf-8") as fh:
-                state = json.load(fh)
-        except Exception:
-            state = {"applied_plans": []}
-    if pid in (state.get("applied_plans") or []):
-        print("plan_id=" + pid + " already_applied=1 committed_writes=0 archived=0")
-        return
-    n_writes = 0
-    for w in plan.get("writes", []):
-        if w.get("op") == "append" and w.get("text"):
-            atomic_append(w["path"], w["text"])
-            n_writes += 1
-    n_arch = 0
-    for p in plan.get("consumed", []):
-        if archive(p, args.data):
-            n_arch += 1
-    state.setdefault("applied_plans", []).append(pid)
-    state["last_plan_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    os.makedirs(os.path.dirname(state_path), exist_ok=True)
-    tmp = state_path + ".tmp-" + uuid.uuid4().hex[:8]
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(state, fh, ensure_ascii=False, indent=2)
-    os.replace(tmp, state_path)
-    print("plan_id=" + pid + " committed_writes=" + str(n_writes) + " archived=" + str(n_arch))
+    os.makedirs(os.path.join(args.data, "staging"), exist_ok=True)   # 锁文件要有地方放
+    lock = MergeLock(os.path.join(args.data, "staging", ".merge.lock"))
+    if not lock.acquire():
+        print("[!] 另一个提交者正在写（.merge.lock 未释放）；本轮不做，稍后重跑同一计划即可",
+              file=sys.stderr)
+        return 2
+    try:
+        state_path = os.path.join(args.data, "staging", ".merged.json")
+        state = {"applied_plans": []}
+        if os.path.exists(state_path):
+            try:
+                with open(state_path, encoding="utf-8") as fh:
+                    state = json.load(fh)
+            except Exception:
+                state = {"applied_plans": []}
+        if pid in (state.get("applied_plans") or []):
+            print("plan_id=" + pid + " already_applied=1 committed_writes=0 archived=0")
+            return 0
+        n_writes = 0
+        for w in plan.get("writes", []):
+            if w.get("op") == "append" and w.get("text"):
+                atomic_append(w["path"], w["text"])
+                n_writes += 1
+        n_arch = 0
+        for p in plan.get("consumed", []):
+            if archive(p, args.data):
+                n_arch += 1
+        state.setdefault("applied_plans", []).append(pid)
+        state["last_plan_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        tmp = state_path + ".tmp-" + uuid.uuid4().hex[:8]
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, state_path)
+        print("plan_id=" + pid + " committed_writes=" + str(n_writes) + " archived=" + str(n_arch))
+        return 0
+    finally:
+        lock.release()
 
 
 def main():
@@ -191,10 +278,9 @@ def main():
     ap.add_argument("--plan", default="", help="执行提交计划")
     args = ap.parse_args()
     if args.plan:
-        do_plan(args)
-    else:
-        do_scan(args)
+        return do_plan(args)
+    return do_scan(args)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

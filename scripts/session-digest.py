@@ -16,6 +16,8 @@ import json
 import os
 import re
 import sqlite3
+import sys
+import time
 
 DEFAULT_DATA = os.environ.get("VARVE_DATA") or os.path.join(os.path.expanduser("~"), ".varve")
 SESSIONS = os.path.join(os.path.expanduser("~"), ".codex", "sessions")
@@ -53,38 +55,86 @@ SCHEMA = [
 ]
 
 
+class RunLock:
+    """跨进程互斥（文件系统 O_EXCL 实现，无第三方依赖）。
+
+    为什么必须串行：两个 digest 同时写同一张表会**同时**踩两个坑（2026-09-26 实测复现）：
+      1) 两个进程各自把 id_map 的当前最大值读进内存当计数器起点 → id 撞车 →
+         turns 的 INSERT OR REPLACE 覆盖掉对方的真实数据行（丢数据），
+         id_map 的 INSERT OR IGNORE 静默丢弃条目（映射永久丢失 → 下次换 id）。
+      2) 冲突的 REPLACE 在默认 `recursive_triggers=OFF` 下**不触发**删除触发器 →
+         FTS5 索引留下指向已删行的幽灵项（检索命中不存在的内容），
+         而 COUNT(*) 行数依然相等 -> 行数对账抓不到。
+
+    拿不到锁就跳过本轮（索引下一轮补齐），绝不并发写。死锁（上次被 kill）按 mtime 超时抢占。
+    """
+
+    def __init__(self, path, wait=30.0, stale=900.0):
+        self.path = path
+        self.wait = wait
+        self.stale = stale
+        self.fd = None
+
+    def acquire(self):
+        deadline = time.time() + self.wait
+        while True:
+            try:
+                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self.fd, ("%d %s\n" % (os.getpid(), time.strftime("%Y-%m-%dT%H:%M:%S"))).encode("utf-8"))
+                return True
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(self.path) > self.stale:
+                        os.remove(self.path)
+                        continue
+                except OSError:
+                    pass
+                if time.time() >= deadline:
+                    return False
+                time.sleep(0.2)
+            except OSError:
+                return True          # 锁文件建不了（权限等）：降级为无锁，不阻塞索引更新
+
+    def release(self):
+        if self.fd is None:
+            return
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+        self.fd = None
+
+
 class IdAllocator:
     """顺序分配的稳定 id：同一 (kind, source, no) 永远拿到同一个 id。
 
     为什么不用哈希 id（v2 试过）：FTS5 的 rowid 会写进每一条索引项，63-bit 随机值
     让 trigram 索引从 ~75MB 涨到 ~145MB。顺序小整数既稳定（不错位）又不膨胀。
     id 只增不减，删除内容行也不会让 id 被复用。
+
+    分配在**写事务内**用 `MAX(id)+1` 完成（调用方必须已持有写事务）——旧实现把计数器
+    缓存在进程内存里，两个并发进程会拿到同一个起点，撞车后丢数据（见 RunLock 注释）。
     """
 
     def __init__(self, con):
         self.con = con
         self.cache = {}
-        self.next = 1
-        for kind, src, no, i in con.execute("SELECT kind, source, no, id FROM id_map"):
-            self.cache[(kind, src, no)] = i
-            if i >= self.next:
-                self.next = i + 1
-        self.pending = []
 
     def get(self, kind, source, no):
         key = (kind, source, no)
         v = self.cache.get(key)
         if v is None:
-            v = self.next
-            self.next += 1
+            self.con.execute(
+                "INSERT OR IGNORE INTO id_map(kind, source, no, id) "
+                "VALUES (?,?,?,(SELECT COALESCE(MAX(id),0)+1 FROM id_map))", key)
+            v = self.con.execute(
+                "SELECT id FROM id_map WHERE kind=? AND source=? AND no=?", key).fetchone()[0]
             self.cache[key] = v
-            self.pending.append((kind, source, no, v))
         return v
-
-    def flush(self):
-        if self.pending:
-            self.con.executemany("INSERT OR IGNORE INTO id_map VALUES (?,?,?,?)", self.pending)
-            self.pending = []
 
 
 def ensure_schema(con):
@@ -142,6 +192,38 @@ def extract_trace(payload):
     return None, ""
 
 
+DATE_IN_NAME_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+UUID_RE = re.compile(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
+
+
+def session_date(path, mtime):
+    """日期取文件名里的 YYYY-MM-DD，取不到就用文件 mtime 的日期。
+
+    旧实现硬切 basename[8:18]，只对 `rollout-YYYY-MM-DDTHH-...` 这一种命名成立；
+    换成别的命名（或非 Codex 适配器的日志）会静默得到空日期 —— 时间线里显示
+    "无日期"、--since 过滤名存实亡（2026-09-26 修）。
+    """
+    m = DATE_IN_NAME_RE.search(os.path.basename(path))
+    if m:
+        return m.group(1)
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(mtime))
+    except (OSError, OverflowError, ValueError):
+        return ""
+
+
+def fallback_sid(path):
+    """没写 session_meta 时的兜底 id：取文件名里的 UUID；没有就取整个词干。
+
+    旧实现切 basename 末 40 字符 —— UUID 是 36 字符，切出来的是"时间戳尾巴 + UUID"
+    的混合串，既不是 UUID 也不稳定（2026-09-26 修）。
+    """
+    base = os.path.splitext(os.path.basename(path))[0]
+    m = UUID_RE.search(base)
+    return m.group(1) if m else base[-64:]
+
+
 def parse_session(path):
     """解析 jsonl -> dict(cwd, sid, date, turns, traces)；无内容返回 None。"""
     cwd = sid = ""
@@ -165,12 +247,13 @@ def parse_session(path):
                 except Exception:
                     continue
                 if p.get("type") == "message" and p.get("role") in ("user", "assistant"):
-                    txt = ""
-                    for c in p.get("content") or []:
-                        if isinstance(c, dict) and c.get("type") in ("input_text", "output_text") and c.get("text"):
-                            txt = c["text"]
-                            break
-                    if not txt:
+                    # 拼接**全部**文本分段：旧实现只取第一段就 break，多段消息
+                    # （文本 + 图片说明 + 补充段落）的后半截会被静默丢掉
+                    txt = "\n".join(
+                        c["text"] for c in (p.get("content") or [])
+                        if isinstance(c, dict) and c.get("type") in ("input_text", "output_text")
+                        and c.get("text"))
+                    if not txt.strip():
                         continue
                     if p["role"] == "user":
                         txt = strip_harness(txt)
@@ -189,7 +272,8 @@ def parse_session(path):
         return None
     if not turns and not traces:
         return None
-    return {"cwd": cwd, "sid": sid or os.path.basename(path)[-40:],
+    # 兜底 sid 不能带扩展名（旧实现直接切 basename 末 40 字符 -> "…ffff.jsonl" 这种脏 id）
+    return {"cwd": cwd, "sid": sid or fallback_sid(path),
             "turns": turns, "traces": traces}
 
 
@@ -199,21 +283,45 @@ def main():
     ap.add_argument("--sessions", default=SESSIONS)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--full", action="store_true")
+    # --fix（audit.py）专用：重灌内容时**不许删内容**。孤儿清理本身是设计内的 GC，
+    # 但它的判据是"文件在 --sessions 下找不到了"，而"找不到"也可能是目录被轮转 /
+    # 网络盘没挂载 / 改名 —— 那种情况下重灌会把库整个清空，且清空后索引自洽、
+    # 审计照样 RESULT=PASS（2026-09-26 复核实测）。--fix 只想修索引，不该冒这个险；
+    # 该删的孤儿留给下一次常规 digest（hook 每次会话启动都会跑）去清。
+    ap.add_argument("--keep-orphans", action="store_true",
+                    help="跳过孤儿清理（--fix 用：宁可留着旧行，也不冒'目录不在=删库'的险）")
     args = ap.parse_args()
 
     idx = os.path.join(args.data, "index")
     os.makedirs(idx, exist_ok=True)
     db = os.path.join(idx, "sessions.db")
+
+    # 并发第一道闸：跨进程互斥。两个 digest 并发写同一张表会丢数据 + 损坏 FTS 索引，
+    # 且损坏是**静默**的（行数对账照样相等）。拿不到锁就跳过本轮，下一轮补齐。
+    lock = RunLock(os.path.join(idx, ".digest.lock"))
+    if not lock.acquire():
+        print("另一个 session-digest 正在写库，本轮跳过（索引下一轮补齐）")
+        return 0
+    try:
+        return run(args, db, idx)
+    finally:
+        lock.release()
+
+
+def run(args, db, idx):
     con = sqlite3.connect(db, timeout=30)
+    # 显式控制事务边界：下面的 id 分配必须和写入处在同一个写事务里才不会被并发插入挤掉
+    con.isolation_level = None
     # 并发与崩溃健壮性（2026-09-23 盲测 #4 / 深夜 hot journal 实况）：
     # WAL 让读写不互斥；busy_timeout 遇锁等待而不是立刻抛 "database is locked"。
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA busy_timeout=30000")
+    # REPLACE 冲突删除的行也要触发删除触发器，否则 FTS5 索引会留下幽灵项
+    con.execute("PRAGMA recursive_triggers=ON")
     upgraded = ensure_schema(con)
     if upgraded:
         args.full = True          # 结构升级 -> 必须全量重灌（内容可从 jsonl 重建）
         print("schema 升级到 v" + str(SCHEMA_VERSION) + "：全量重建内容")
-    con.commit()
 
     alloc = IdAllocator(con)
 
@@ -242,49 +350,84 @@ def main():
         if rec is None:
             empty += 1
             con.execute("INSERT OR REPLACE INTO file_state VALUES (?,?,?)", (rel, mtime, size))
-            con.commit()
             continue
         sid = rec["sid"]
-        date = os.path.basename(p)[8:18]
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
-            date = ""
-        con.execute("DELETE FROM turns WHERE source=?", (rel,))
-        con.execute("DELETE FROM traces WHERE source=?", (rel,))
-        for no, (ls, le, q, a) in enumerate(rec["turns"], 1):
-            # 跨 source 去重（盲测 #6）：resume 会话会产生内容重叠的多个 rollout，
-            # 同一 (session_id, turn_no) 只保留最后写入的一份，避免 BM25 统计被稀释。
-            con.execute("DELETE FROM turns WHERE session_id=? AND turn_no=?", (sid, no))
-            con.execute("INSERT OR REPLACE INTO turns "
-                        "(id, session_id, workspace, date, turn_no, src_line_start, src_line_end, source, question, answer) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        (alloc.get("turn", rel, no), sid, rec["cwd"], date, no, ls, le, rel, q, a))
-        for seq, kind, txt, ln in rec["traces"]:
-            con.execute("INSERT OR REPLACE INTO traces "
-                        "(id, session_id, seq, kind, text, src_line, source) VALUES (?,?,?,?,?,?,?)",
-                        (alloc.get("trace", rel, seq), sid, seq, kind, txt, ln, rel))
-        con.execute("INSERT OR REPLACE INTO file_state VALUES (?,?,?)", (rel, mtime, size))
-        alloc.flush()
-        con.commit()
+        date = session_date(p, mtime)
+        # 每个文件一个写事务（BEGIN IMMEDIATE = 立刻拿写锁，避免升级锁时才发现冲突）
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            con.execute("DELETE FROM turns WHERE source=?", (rel,))
+            con.execute("DELETE FROM traces WHERE source=?", (rel,))
+            for no, (ls, le, q, a) in enumerate(rec["turns"], 1):
+                # 跨 source 去重（盲测 #6）：resume 会产生内容重叠的多个 rollout。
+                # 判据必须是**内容相同**才删——旧实现只看 (session_id, turn_no)，
+                # 分叉会话在同一个序号上是不同的真实轮次，会被整条吃掉（丢真实数据）。
+                con.execute("DELETE FROM turns WHERE session_id=? AND turn_no=? "
+                            "AND question=? AND answer=?", (sid, no, q, a))
+                # 显式 INSERT（不用 INSERT OR REPLACE）：REPLACE 的冲突删除在
+                # recursive_triggers=OFF 时不触发删除触发器，会让 FTS 索引残留幽灵项
+                con.execute("INSERT INTO turns "
+                            "(id, session_id, workspace, date, turn_no, src_line_start, src_line_end, source, question, answer) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (alloc.get("turn", rel, no), sid, rec["cwd"], date, no, ls, le, rel, q, a))
+            for seq, kind, txt, ln in rec["traces"]:
+                con.execute("INSERT INTO traces "
+                            "(id, session_id, seq, kind, text, src_line, source) VALUES (?,?,?,?,?,?,?)",
+                            (alloc.get("trace", rel, seq), sid, seq, kind, txt, ln, rel))
+            con.execute("INSERT OR REPLACE INTO file_state VALUES (?,?,?)", (rel, mtime, size))
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
         written += 1
         n_turns += len(rec["turns"])
         n_traces += len(rec["traces"])
 
-    # 孤儿清理：源文件已消失（删除/改名）的记录一并清掉，索引不会指向不存在的会话
+    # 孤儿清理：源文件已消失（删除/改名）的记录一并清掉，索引不会指向不存在的会话。
+    # 删除前**再确认文件真的不在**：本轮的文件列表是启动时的快照，如果同时有另一个
+    # 进程刚索引了新出现的会话文件，只按快照判断会把这个新会话的行整段删掉。
     orphans = 0
     for (rel,) in con.execute("SELECT rel FROM file_state").fetchall():
-        if rel not in existing:
-            con.execute("DELETE FROM turns WHERE source=?", (rel,))
-            con.execute("DELETE FROM traces WHERE source=?", (rel,))
-            con.execute("DELETE FROM file_state WHERE rel=?", (rel,))
-            orphans += 1
+        if rel in existing:
+            continue
+        if os.path.exists(os.path.join(args.sessions, rel.replace("/", os.sep))):
+            continue
+        if args.keep_orphans:
+            continue
+        con.execute("DELETE FROM turns WHERE source=?", (rel,))
+        con.execute("DELETE FROM traces WHERE source=?", (rel,))
+        con.execute("DELETE FROM file_state WHERE rel=?", (rel,))
+        orphans += 1
 
     con.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
     if written or orphans:
         con.execute("INSERT OR REPLACE INTO meta VALUES ('content_updated_at', datetime('now'))")
-    con.commit()
 
-    if upgraded:
-        # 结构升级会留下大量空闲页（DROP 不缩文件）；升级后回收一次，避免体积虚高
+    # 记录"这次是拿哪个目录建的库"。audit.py --fix 会拿它跟 --sessions 比对：不一致就
+    # 拒绝重灌。没有这个记录时 --fix 只能靠"来源是否重叠"猜，而**部分重叠**（未同步完
+    # 的镜像 / 只恢复了一个月的机器）会让孤儿清理静默删掉其余来源、审计照样 PASS
+    # （2026-09-26 复核实测：1/5 重叠 -> 删 4 个源、rc=0、RESULT=PASS）。
+    root_abs = os.path.abspath(args.sessions)
+    row = con.execute("SELECT v FROM meta WHERE k='sessions_root'").fetchone()
+    if not row or row[0] != root_abs:
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('sessions_root', ?)", (root_abs,))
+
+    if args.full or upgraded:
+        # 全量重灌/结构升级会把库撑大，两步都要做：
+        #   ① optimize：逐行 DELETE+INSERT 会把 trigram 索引切成一堆小段，FTS5 只在提交时
+        #      按有限预算合并，段一多**在用页**就长期虚胖（真实库实测 94.9 -> 151.8 MB 在用，
+        #      optimize 后回到 91.9 MB —— 内容只多 68 轮，涨的全是索引碎片）。
+        #   ② VACUUM：optimize 合并后腾出的页仍留在文件里（DROP/重建同理），只有 VACUUM
+        #      才会缩文件（实测 155.9 MB 的文件里 64 MB 是空闲页）。
+        # 两步都不碰内容表，失败也不算错误 —— 索引本身已经建好了。
+        for t in ("turns_fts", "traces_fts"):
+            if not con.execute("SELECT COUNT(*) FROM sqlite_master WHERE name=?",
+                               (t,)).fetchone()[0]:
+                continue
+            try:
+                con.execute("INSERT INTO " + t + "(" + t + ") VALUES('optimize')")
+            except sqlite3.OperationalError as e:
+                print("warn: " + t + " optimize 跳过（" + str(e) + "）")
         try:
             con.execute("VACUUM")
             print("已 VACUUM 回收碎片")
@@ -298,7 +441,8 @@ def main():
           + " | +turns=" + str(n_turns) + " +traces=" + str(n_traces)
           + " | total_turns=" + str(t) + " total_traces=" + str(r))
     con.close()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

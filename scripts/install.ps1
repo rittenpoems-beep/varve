@@ -14,6 +14,8 @@ install.ps1 — Varve 安装器：让一个陌生用户从零到"记忆自动生
   pwsh -NoProfile -File scripts\install.ps1 -Scope project -Project D:\my-project
       # 只对该项目生效
   pwsh -NoProfile -File scripts\install.ps1 -DataRoot D:\varve-data -AppendAgents
+      # -DataRoot 非默认目录时会**持久化**用户环境变量 VARVE_DATA（否则脚本找不到数据根）；
+      # 不想动环境变量就加 -NoSetEnv（此时会以 [FAIL] 提示手动设置）
 
 退出码：0 = 全部检查通过；1 = 存在 [FAIL] 项（供 CI / 自动化感知，2026-09-23 修）。
 装完后唯一的手动步骤：在 Codex UI 里点一次 hooks 信任（New hook - review required）。
@@ -23,17 +25,26 @@ param(
     [string]$DataRoot = "",
     [switch]$AppendAgents,
     [switch]$Force,
+    [switch]$NoSetEnv,
     [ValidateSet("user", "project")][string]$Scope = "user"
 )
 
 $ErrorActionPreference = "Stop"
 $installDir = Split-Path -Parent $PSScriptRoot
 $ok = $true
+$givenRoot = $DataRoot          # 分清"用户显式传了 -DataRoot"和"用了默认值"
 
 function Step($msg) { Write-Output ("`n== " + $msg) }
 function Good($msg) { Write-Output ("  [OK]   " + $msg) }
 function Warn($msg) { Write-Output ("  [WARN] " + $msg) }
 function Bad($msg)  { Write-Output ("  [FAIL] " + $msg); $script:ok = $false }
+
+function Get-PyVer($s) {
+    # check-env.py 没跑起来时 $E["python"] 是 $null，直接 [version]$null 会抛异常 ——
+    # 把"环境不合规"变成"安装器崩溃"（2026-09-26 修）
+    if ([string]::IsNullOrWhiteSpace([string]$s)) { return $null }
+    try { return [version]([string]$s) } catch { return $null }
+}
 
 # ---------- 1. 环境检查 ----------
 Step "1/5 环境检查"
@@ -43,8 +54,12 @@ if ($py) {
     $envLines = & python -X utf8 "$PSScriptRoot\check-env.py" 2>$null
     $E = @{}
     foreach ($l in $envLines) { $kv = $l -split "=", 2; if ($kv.Count -eq 2) { $E[$kv[0]] = $kv[1] } }
-    if ([version]$E["python"] -ge [version]"3.10") { Good ("Python " + $E["python"] + " @ " + $py.Source) }
-    else { Bad ("Python 版本过低: " + $E["python"] + "（需要 3.10+）") }
+    $pv = Get-PyVer $E["python"]
+    if (-not $pv) {
+        Bad ("check-env.py 未返回可用版本号（输出：" + (($envLines -join " / ")) + "）")
+    } elseif ($pv -ge [version]"3.10") {
+        Good ("Python " + $E["python"] + " @ " + $py.Source)
+    } else { Bad ("Python 版本过低: " + $E["python"] + "（需要 3.10+）") }
     if ($E["trigram"] -eq "ok") { Good ("SQLite " + $E["sqlite"] + " 含 FTS5 + trigram") }
     else { Bad "SQLite 缺少 FTS5/trigram —— 索引不可用" }
 } else { Bad "未找到 python（需要 3.10+，且 sqlite 带 FTS5）" }
@@ -55,14 +70,43 @@ else { Warn "建议 PowerShell 7+（pwsh）" }
 # ---------- 2. 数据目录 ----------
 Step "2/5 数据目录"
 
-if (-not $DataRoot) { $DataRoot = Join-Path $env:USERPROFILE ".varve" }
+$defaultRoot = [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ".varve"))
+if (-not $DataRoot) { $DataRoot = $defaultRoot }
 $DataRoot = [System.IO.Path]::GetFullPath($DataRoot)
 foreach ($d in @("", "index", "records", "staging")) {
     $p = if ($d) { Join-Path $DataRoot $d } else { $DataRoot }
     if (-not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p | Out-Null }
 }
 Good ("数据目录: " + $DataRoot)
-Warn ("其他脚本要找到它，请设置环境变量：`$env:VARVE_DATA = `"" + $DataRoot + "`"（可在系统设置里持久化）")
+
+# 数据根必须让**所有**脚本都找得到（靠 $env:VARVE_DATA）。旧实现只打一句 Warn ——
+# 用户传了 -DataRoot 却没设环境变量时，hook / recall 会去 ~/.varve 找，
+# 表现成"记忆没生效"，且没有任何报错（静默的根目录不匹配，2026-09-26 修）。
+$curRoot = [Environment]::GetEnvironmentVariable("VARVE_DATA", "User")
+if ($DataRoot -ne $defaultRoot) {
+    if ($givenRoot -and -not $NoSetEnv) {
+        if ($curRoot -and [System.IO.Path]::GetFullPath($curRoot) -ne $DataRoot) {
+            Warn ("用户环境变量 VARVE_DATA 原指向 " + $curRoot + "，本次覆盖为 " + $DataRoot)
+        }
+        try {
+            [Environment]::SetEnvironmentVariable("VARVE_DATA", $DataRoot, "User")
+            $env:VARVE_DATA = $DataRoot
+            Good ("已持久化用户环境变量 VARVE_DATA=" + $DataRoot + "（本次会话立即生效；撤销：删掉该环境变量）")
+        } catch {
+            Bad ("无法写入用户环境变量（" + $_.Exception.Message + "）：请手动设置 VARVE_DATA=" + $DataRoot)
+        }
+    } elseif ($curRoot -and [System.IO.Path]::GetFullPath($curRoot) -eq $DataRoot) {
+        Good ("VARVE_DATA 已指向 " + $DataRoot + "（-NoSetEnv：未改动环境变量）")
+    } else {
+        Bad ("数据根不是默认目录，但 VARVE_DATA 未指向它 —— 脚本会去 " + $defaultRoot +
+             " 找数据。请手动设置 VARVE_DATA=" + $DataRoot + "，或去掉 -NoSetEnv 重跑")
+    }
+} elseif ($curRoot -and [System.IO.Path]::GetFullPath($curRoot) -ne $defaultRoot) {
+    Bad ("用户环境变量 VARVE_DATA 指向 " + $curRoot + "，但本次安装用默认目录 " +
+         $defaultRoot + " —— 两者必须一致（改环境变量或传 -DataRoot 指向 " + $curRoot + "）")
+} else {
+    Good ("VARVE_DATA 未设置，全部脚本将使用默认目录 " + $defaultRoot)
+}
 
 $globalStatus = Join-Path $DataRoot "STATUS.md"
 if (-not (Test-Path -LiteralPath $globalStatus)) {
@@ -77,6 +121,14 @@ if (-not (Test-Path -LiteralPath $globalStatus)) {
 
 # ---------- 3. hooks.json ----------
 Step ("3/5 hooks.json（scope=" + $Scope + "）")
+
+# 没有可用的 python 就**不要**写 hooks.json：旧实现会写出解释器路径为空的配置，
+# 而 hook 失败是静默的 —— 用户以为装好了，其实一条都没跑（2026-09-26 修）。
+if (-not $py) {
+    Write-Output ""
+    Write-Output "== 安装中止：未找到 python（3.10+）。hooks.json 需要绝对解释器路径，先装好 Python 再重跑。"
+    exit 1
+}
 
 # 默认 user：写 ~/.codex/hooks.json，对所有工作区生效（与 install-claude.ps1 对称）
 # project：只写 <Project>/.codex/hooks.json，仅该项目生效

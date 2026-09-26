@@ -31,6 +31,13 @@ RRF_K = 60
 SNAPSHOT_MARK = "<!-- ===== 快照 ===== -->"
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from varve_hooks_common import snapshot_marks      # 代码区里的标记不算真快照
+except Exception:                                       # 兜底：独立运行时不致命
+    def snapshot_marks(text):
+        return [m.start() for m in re.finditer(re.escape(SNAPSHOT_MARK), text)]
+
 
 def fts_quote(v):
     """把自然语言查询转成 FTS5 表达式：多词 → 各自成短语、按 OR 连接。
@@ -102,7 +109,11 @@ def scan_records(data_root, terms, limit=6):
 # ---------- 主题时间线（--topic，演化型查询）----------
 
 def scan_snapshots(data_root, topic, limit=40):
-    """L2 快照流里含 topic 的条目 -> [(date, label, text)]。"""
+    """L2 快照流里含 topic 的条目 -> [(date, label, text)]。
+
+    只保留**最新**的 limit 条（2026-09-26 修）：快照是追加写的，从头往下取到上限
+    等于"只保留最旧的"，最新的状态反而全被丢掉 —— 与"最新快照优先"的设计正好相反。
+    """
     path = os.path.join(data_root, "STATUS.md")
     if not os.path.exists(path):
         return []
@@ -111,9 +122,11 @@ def scan_snapshots(data_root, topic, limit=40):
             txt = fh.read()
     except OSError:
         return []
+    marks = snapshot_marks(txt)
     out = []
-    parts = txt.split(SNAPSHOT_MARK)
-    for i, seg in enumerate(parts[1:], 1):
+    for i, pos in enumerate(marks, 1):
+        end = marks[i] if i < len(marks) else len(txt)
+        seg = txt[pos + len(SNAPSHOT_MARK):end]
         m = DATE_RE.search(seg)
         date = m.group(1) if m else ""
         for ln in seg.splitlines():
@@ -122,11 +135,14 @@ def scan_snapshots(data_root, topic, limit=40):
                 continue
             if s.startswith("- ") or s.startswith("**"):
                 out.append((date, "快照#" + str(i), s[:150]))
-    return out[:limit]
+    return out[-limit:]
 
 
 def scan_records_dated(data_root, topic, limit=40):
-    """records 命中 + 用上文最近的 ### 日期标题补日期 -> [(date, label, text)]。"""
+    """records 命中 + 用上文最近的 ### 日期标题补日期 -> [(date, label, text)]。
+
+    同样只保留**最新**的 limit 条：records 是追加写的，正序取到上限会先丢最新记录。
+    """
     rdir = os.path.join(data_root, "records")
     if not os.path.isdir(rdir):
         return []
@@ -146,11 +162,9 @@ def scan_records_dated(data_root, topic, limit=40):
                         continue
                     if s and not s.startswith("<!--") and topic in s:
                         out.append((date, fn + ":" + str(ln), s[:150]))
-                        if len(out) >= limit:
-                            return out
         except OSError:
             continue
-    return out
+    return out[-limit:]
 
 
 def scan_turns_dated(con, topic, workspace, since, limit=60):
@@ -164,12 +178,16 @@ def scan_turns_dated(con, topic, workspace, since, limit=60):
 
 
 def print_topic_timeline(data_root, con, topic, workspace, since):
-    """演化型查询：按主题拉全部线索，按时间升序排开（设计出处：索引规格 §3.6）。"""
+    """演化型查询：按主题拉全部线索，按时间升序排开（设计出处：索引规格 §3.6）。
+
+    每源有上限（快照/records 各 40、会话 60），且**达到上限时保留最新的**。
+    命中触顶必须**明说**——否则用户会把"截断后的视图"误当成"全部线索"（2026-09-26 修）。
+    """
     t0 = time.time()
-    items = []
-    items.extend(scan_snapshots(data_root, topic))
-    items.extend(scan_records_dated(data_root, topic))
-    items.extend(scan_turns_dated(con, topic, workspace, since))
+    snaps = scan_snapshots(data_root, topic)
+    recs = scan_records_dated(data_root, topic)
+    turns = scan_turns_dated(con, topic, workspace, since)
+    items = snaps + recs + turns
     items.sort(key=lambda x: (x[0] or "9999-99-99"))
     elapsed = round(time.time() - t0, 3)
     print("【主题时间线】" + topic + "   共 " + str(len(items)) + " 条线索（时间升序）   "
@@ -181,8 +199,18 @@ def print_topic_timeline(data_root, con, topic, workspace, since):
     for date, label, text in items:
         print("  " + (date or "无日期") + "  " + label + "  " + text)
     print("")
-    print("【覆盖】三源合并（L2 快照 / records / 对话历史）；按主题**逐字匹配**——"
+    print("【覆盖】三源合并：L2 快照 " + str(len(snaps)) + " / records " + str(len(recs))
+          + " / 对话历史 " + str(len(turns)) + " 条；按主题**逐字匹配**——"
           "无共同词的关联线索不会被本视图捞到。")
+    capped = []
+    for name, n, cap, flt in (("L2 快照", len(snaps), 40, "（每源上限 40）"),
+                              ("records", len(recs), 40, "（每源上限 40）"),
+                              ("对话历史", len(turns), 60, "（每源上限 60）")):
+        if n >= cap:
+            capped.append(name + flt)
+    if capped:
+        print("  注意：" + " / ".join(capped) + " 已达上限，**只保留了最新的**——"
+              "这不是全部线索。收窄主题词可看到更早的部分。")
     return 0
 
 
@@ -192,9 +220,38 @@ def run_variant(con, variant, workspace, since, raw, limit=200):
     """返回 (rows, total)；rows = [(sid, ws, date, turn, ls, le, source, score, snip)]。
 
     total = 该变体的**总命中块数**（不截断）——供【覆盖】行报告完整度。
+
+    按**词**分流（2026-09-26 修）：trigram 分词器的匹配下限是 3 字符，2 字中文词
+    在 FTS 路径下**恒为 0 命中**（静默）。旧实现只看整个参数字符串的长度，于是
+    "压缩 修复"（长度 5）走 FTS、两个词各自被丢 -> 0 条且无任何提示。现在逐词判定：
+    <3 字的词走字面兜底，>=3 字的走 FTS，两路结果并集（FTS 在前，保相关性排序）。
     """
-    if len(variant) < 3:                      # 短词（多为中文双字）-> 字面兜底
-        return run_like(con, variant, workspace, since, limit)
+    if raw:                                   # --raw = 原生 FTS5 语法，整串交给 FTS
+        return _run_fts(con, variant, workspace, since, True, limit)
+    words = [w for w in variant.split() if w]
+    if not words:
+        return [], 0
+    long_fts = [w for w in words if len(w) >= 3]
+    short_lit = [w for w in words if len(w) < 3]
+    rows, total, seen = [], 0, set()
+    paths = []
+    if long_fts:
+        paths.append(_run_fts(con, " ".join(long_fts), workspace, since, False, limit))
+    if short_lit:
+        paths.append(run_like(con, short_lit, workspace, since, limit))
+    for part, t in paths:
+        total += t
+        for row in part:
+            key = (row[0], row[6], row[3])     # (sid, source, turn) —— 与 aggregate 同键
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+    return rows[:limit], total
+
+
+def _run_fts(con, variant, workspace, since, raw, limit=200):
+    """FTS5 路径（变体已保证 >=3 字符，或 --raw 原生语法）。返回 (rows, total)。"""
     if not raw and re.search(r"\b(AND|OR|NOT|NEAR)\b", variant):
         print("warn: 查询含 FTS5 语法关键词但未加 --raw，已按普通词拆分处理: " + variant, file=sys.stderr)
     q = variant if raw else fts_quote(variant)
@@ -218,32 +275,48 @@ def run_variant(con, variant, workspace, since, raw, limit=200):
         return [], 0
 
 
-def run_like(con, term, workspace, since, limit):
-    """短词（<3 字符，多为中文双字）字面兜底。返回 (rows, total)。
+def run_like(con, terms, workspace, since, limit):
+    """短词（<3 字符，多为中文双字）字面兜底。terms 为词表，任一命中即算。返回 (rows, total)。
 
-    该路径无相关性打分（score 固定 -2.0），排序按新近度 —— 盲测显示：目标几乎
-    都在候选集里，丢的只是排序（中文双字词在默认 limit=5 下全 MISS）。
-    更贴合的做法是按命中位置 / 次数打分，先以最小改动（新近度）兜住可用性。
+    trigram 分词器的最小单位是 3 字符：2 字词走 FTS 恒为 0 命中。该路径无相关性
+    打分（score 固定 -2.0），排序按新近度 —— 盲测显示：目标几乎都在候选集里，
+    丢的只是排序（中文双字词在默认 limit=5 下全 MISS）。
+    片段锚点取**所有词中最早出现的位置**，避免多词时锚在没命中的那个词上。
     """
-    where = "WHERE (question LIKE ? OR answer LIKE ?)"
-    params = ["%" + term + "%", "%" + term + "%"]
+    if isinstance(terms, str):
+        terms = [terms]
+    terms = [t for t in terms if t]
+    if not terms:
+        return [], 0
+    txt = "COALESCE(question,'') || ' ' || COALESCE(answer,'')"
+    where = "WHERE (" + " OR ".join("(question LIKE ? OR answer LIKE ?)" for _ in terms) + ")"
+    params = []
+    for t in terms:
+        params += ["%" + t + "%", "%" + t + "%"]
     if workspace:
         where += " AND workspace LIKE ?"
         params.append("%" + workspace + "%")
     if since:
         where += " AND (date = '' OR date >= ?)"
         params.append(since)
+    if len(terms) == 1:
+        anchor = "NULLIF(instr(" + txt + ",?),0)"
+    else:
+        # 注意：SQLite 的**多参数**标量 min() 只要有一个参数是 NULL 就返回 NULL
+        # （与聚合 min 忽略 NULL 的行为相反）——所以每个词先 COALESCE 成大哨兵值，
+        # 否则"只命中其中一词"的行会拿到 NULL 片段，展示时直接崩（2026-09-26 实测）。
+        anchor = "min(" + ",".join(
+            "COALESCE(NULLIF(instr(" + txt + ",?),0),1000000000)" for _ in terms) + ")"
     try:
         total = con.execute("SELECT COUNT(*) FROM turns " + where, params).fetchone()[0]
         sql = ("SELECT session_id, workspace, date, turn_no, src_line_start, src_line_end, source, "
                "-2.0 AS s, "
-               "substr(COALESCE(question,'') || ' ' || COALESCE(answer,''), "
-               "max(1, instr(COALESCE(question,'') || ' ' || COALESCE(answer,''), ?) - 40), 160) "
+               "substr(" + txt + ", max(1, " + anchor + " - 40), 160) "
                "FROM turns " + where +
                " ORDER BY (date IS NULL OR date = '') ASC, date DESC, turn_no DESC LIMIT ?")
-        return con.execute(sql, [term] + params + [limit]).fetchall(), total
+        return con.execute(sql, terms + params + [limit]).fetchall(), total
     except sqlite3.OperationalError as e:
-        print("warn: 字面查询失败 [" + term + "]: " + str(e), file=sys.stderr)
+        print("warn: 字面查询失败 [" + " ".join(terms) + "]: " + str(e), file=sys.stderr)
         return [], 0
 
 
@@ -319,7 +392,7 @@ def aggregate(results_by_variant, limit):
             # 盲测 #14：该字段是命中片段预览（FTS snippet），不是"标题"——改名以免误导
             "preview": re.sub(r"\s+", " ", block_meta[top[0][1]][8] or "")[:60],
             "snippets": [{"turn": k[2], "src": [block_meta[k][4], block_meta[k][5]],
-                          "text": block_meta[k][8]} for _, k in top],
+                          "text": block_meta[k][8] or ""} for _, k in top],
         })
     sessions.sort(key=lambda x: -x["score"])
     return sessions[:limit]
@@ -362,9 +435,11 @@ def main():
         return rc
 
     if args.timeline or not args.queries:
+        # MAX(date)：GROUP BY 下裸列 date 是**任取一行**的值（跨天会话会显示成启动那天，
+        # 排序也跟着乱）。取该会话最新一轮的日期才是"最近活动"（2026-09-26 修）。
         rows = con.execute(
-            "SELECT date, workspace, session_id, COUNT(*) FROM turns "
-            "WHERE (date = '' OR date >= ?) GROUP BY session_id ORDER BY date DESC LIMIT ?",
+            "SELECT MAX(date) AS d, workspace, session_id, COUNT(*) FROM turns "
+            "WHERE (date = '' OR date >= ?) GROUP BY session_id ORDER BY d DESC LIMIT ?",
             (sid_filter or "0000-00-00", args.limit)).fetchall()
         for d, ws, sid, c in rows:
             title = con.execute("SELECT question FROM turns WHERE session_id=? ORDER BY turn_no LIMIT 1",
@@ -444,10 +519,13 @@ def main():
           + "；records " + str(len(rec_hits)) + " 行（上限 6）")
     print("  未展示不等于不存在：程序按相关性截断。要完整线索，用 --topic <主题> 拉时间线，"
           "或收窄查询（加词 / --workspace / --since）。")
-    short = [q for q in variants if len(q) < 3]
+    # --raw 下整串按 FTS5 原生语法送进 FTS，短词**没有**走字面兜底：这里一律照报就是
+    # 句假话（例如 `--raw "a OR b"` 会声称 a/b 走了字面匹配）。旧实现判的是整个变体的
+    # 长度、与 run_variant 的路由一致，改成逐词分流后这层对应关系断了，2026-09-26 复核发现。
+    short = [] if args.raw else sorted({w for q in variants for w in q.split() if 0 < len(w) < 3})
     if short:
         print("")
-        print("（<3 字符变体已走字面匹配：" + " ".join(short) + "）")
+        print("（<3 字符的词已走字面兜底（trigram 分词器下限 3 字符）：" + " ".join(short) + "）")
     con.close()
     return 0
 

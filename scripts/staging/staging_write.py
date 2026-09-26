@@ -56,8 +56,13 @@ def main():
         "ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     path = os.path.join(wdir, stamp + "-" + proposal_id[:8] + ".json")
-    with open(path, "x", encoding="utf-8") as fh:
+    # 写临时文件再原子改名（2026-09-26 修）：直接 open(path,"x") 会让并发的
+    # --scan 有可能读到**只写了一半**的 JSON -> 解析失败 -> 该提案在那一轮隐身
+    # （写者以为交了，读者看不到）。同目录改名在 POSIX/NTFS 上都是原子的。
+    tmp = path + ".part-" + uuid.uuid4().hex[:8]
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(rec, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
     print(path)
 
 

@@ -31,10 +31,13 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
 $lines = Get-Content -LiteralPath $ConfigPath -Encoding UTF8
 $paths = @()
 foreach ($l in $lines) {
-    # 兼容单/双引号（盲测 #8：只认单引号会静默漏掉工作区）
-    $m = [regex]::Match($l, '^\[projects\.(.+)\]$')
+    # 兼容单/双引号（盲测 #8：只认单引号会静默漏掉工作区）。
+    # 正则必须**只认紧跟引号就闭合**的表头：旧写法 `^\[projects\.(.+)\]$` 会把
+    # 子表 [projects.'D:\x'.trust] 也抓进来，登记出 `D:\x'.trust` 这种垃圾路径
+    # （2026-09-26 修；与 varve_hooks_common.py 的 sync_projects 保持同一判据）。
+    $m = [regex]::Match($l, "^\s*\[projects\.(?:'([^']+)'|`"([^`"]+)`")\]\s*(?:#.*)?$")
     if ($m.Success) {
-        $p = $m.Groups[1].Value.Trim("'", '"')
+        $p = if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }
         if ($p) { $paths += $p }
     }
 }
