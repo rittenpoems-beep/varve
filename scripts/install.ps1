@@ -122,11 +122,13 @@ if (-not (Test-Path -LiteralPath $globalStatus)) {
 # ---------- 3. hooks.json ----------
 Step ("3/5 hooks.json（scope=" + $Scope + "）")
 
-# 没有可用的 python 就**不要**写 hooks.json：旧实现会写出解释器路径为空的配置，
+# 没有**可用**的 python 就不要写 hooks.json：旧实现会写出解释器路径为空的配置，
 # 而 hook 失败是静默的 —— 用户以为装好了，其实一条都没跑（2026-09-26 修）。
-if (-not $py) {
+# 判据原先只看"找没找到 python"：3.9 这种版本不够的解释器照样被写进 hooks.json，
+# 当场只有一行 [FAIL]，hook 要等运行时才静默失败。现在与 install-claude.ps1 一样按版本拦。
+if (-not $py -or -not $pv -or $pv -lt [version]"3.10") {
     Write-Output ""
-    Write-Output "== 安装中止：未找到 python（3.10+）。hooks.json 需要绝对解释器路径，先装好 Python 再重跑。"
+    Write-Output "== 安装中止：未找到可用的 python（需要 3.10+）。hooks.json 要写绝对解释器路径，版本不够时 hook 会在运行时静默失败 —— 先装好 Python 再重跑。"
     exit 1
 }
 

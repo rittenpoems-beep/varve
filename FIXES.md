@@ -71,6 +71,7 @@
 | FIX-022a | **[自检][实测]** 我修 FIX-022 时**自己引入的假报告**：`recall.py --raw` 把整串按 FTS5 原生语法送进 FTS，短词**没有**走字面兜底，可收尾提示仍照着 `variants` 里的短词报"走了字面兜底"（`--raw "a OR b"` 会声称 a/b 走了字面匹配）。根因：这层提示原先靠"整个变体的长度"和 `run_variant` 的路由对上，改成**逐词**分流后对应关系就断了；2026-09-26 复核自读 diff 时发现 | `short = [] if args.raw else sorted({...})` —— `--raw` 下不再声称任何词走了兜底 | `--only recall-short-words`（新增两条断言：非 `--raw` 必须提示兜底；`--raw` 不得出现"字面兜底 / 字面匹配"） |
 | FIX-030 | **[审查][实测]** `audit.py` 的 B 项（重复入库）旧判据数的是**所有**同名 `(session_id, turn_no)`：resume **分叉**会话在同一序号上的真实轮次被算成"重复"，于是 B 项永远收敛不到 0、`RESULT=PASS` 永远拿不到（与 FIX-027"分叉轮次合法保留"直接矛盾，第三轮验证 Agent 的 F1） | B 项改为只数**内容完全相同**（`GROUP BY session_id, turn_no, question, answer`）的重复入库；同名不同内容的另计一条 `B_note` 作提示（"fork_turns，合法保留"）。文本报告同步改成"B 重复入库: N（另 M 个同名不同内容 = fork，合法）" | `--only audit-fork-dedup`（只有 fork 的库必须 `B=0` 且 `rc=0`；注入一条内容相同的重复行后再跑，必须 `B=1` 且 `rc≠0`） |
 | FIX-031 | **[审查][实测]** 一次官方修复路径（`--full` 重灌 + `--force` 重建）之后库**不会自己缩回去**：① 逐行 DELETE+INSERT 把 trigram 索引切成一堆小段，FTS5 只在提交时按有限预算合并，段一多**在用页**就长期虚胖（真实库 94.9 → 151.8 MB 在用，内容只多了 68 轮）② `optimize` 合并后腾出的页、以及 `--force` 丢掉旧索引留下的页，都还留在**文件**里（155.9 MB 的文件里 64 MB 是空闲页）。实测真实库跑完 `--full` + `--force` 文件到 152.4 MB / 13833 页空闲 | `session-digest.py` 在 `--full`（或结构升级）后：先对 `turns_fts` / `traces_fts` 各做一次 `optimize`（合并段、缩在用页），再 `VACUUM`（缩文件）；`build-search-index.py --force` 的重建路径在 `commit` 后也 `VACUUM`（重建后内容变少时，新索引只吃得下旧页的一部分）。两处都容错：优化失败只打 warn，不影响"索引已建好" | `--only digest-full-compact`（夹具 6 文件 × 80 轮：重灌两轮后在用页比值卡 1.10；第二段先删 3/4 轮次再 `--force`，空闲页卡 `max(5, 页数/20)`） |
+| FIX-032 | **[自检][实测]** `install.ps1` 的"没有 python 就停手"守卫**不看版本**：判据只问"找没找到 `python`"，3.9 这种版本不够的解释器照样被写进 `hooks.json` —— 当场确实有一行 `[FAIL]`、退出码也是 1，但配置已经落地，hook 要等**运行时**才静默失败（用户以为装好了，其实一条都没跑）。守卫上一行的注释写的是"没有**可用**的 python"，比实现宽（2026-09-26 移植后复读 diff 时发现；`install-claude.ps1` 早就按版本拦了，两个安装器不对称） | `install.ps1` 的守卫改成 `if (-not $py -or -not $pv -or $pv -lt [version]"3.10") { …; exit 1 }`，与 `install-claude.ps1` 对称；中止信息点明"版本不够时 hook 会在运行时静默失败" | `--only ps-install-guard`（含两个场景："找不到 python" / 桩 python 只报 `python=3.9.0`，都必须退出码非 0 **且未写出** `hooks.json`） |
 
 **本轮新增工具**：`scripts/regression_test.py` —— 把上表**能自动验的**"复发检查"写成可执行用例（现 22 条；
 需要写用户注册表的那一支不进去，FIX-025 行末已注明）。零第三方依赖，临时目录自建自清，不碰 `VARVE_DATA`
@@ -91,33 +92,37 @@ B 项退回旧判据（"数所有同名 sid+turn_no"→ 只有 fork 的库审计
 改成"先删 3/4 轮次再 `--force`"（新索引吃不下旧页，不 VACUUM 实测留 88 页 = 55%）后才真正生效。
 
 **第四轮：拿变异体反查"用例本身是不是空的"**（2026-09-26，第三轮验证 Agent 提的 C2–C8）。
-这一轮改的不是产品代码，而是**用例**：15 个变异体（含 4 份"退回 HEAD 旧实现"）+ 9 个对照（未变异的
-副本／原样仓库），共 24 次跑，全部在临时副本里做 —— 仓库与真实数据一个字节都没动。
+这一轮改的不是产品代码，而是**用例**：16 个变异体（含 4 份"退回 `36bd4bf` 旧实现"）+ 9 个对照（未变异的
+副本／原样仓库），共 25 次跑，全部在临时副本里做 —— 仓库与真实数据一个字节都没动。
+
+> 基线**必须写死 commit**：本轮最初把"修好之前"写成 `HEAD`，一旦提交，`git show HEAD:<文件>` 拿到的
+> 就是**修好的代码**，那 4 个整文件变异体会退化成空转（重跑只得 12/16 被杀）。第四轮验证 Agent 抓到
+> 这一点后，脚本里的基线一律改成 `36bd4bf`（本轮修复前的公开仓 HEAD），重跑恢复 16/16。
 
 | 用例 | 变异体 | 结果 |
 |---|---|---|
-| `digest-concurrent` | 锁永不生效（`acquire` 直接 True）／锁永不释放（`release` no-op）／永不抢占（`acquire` 直接 False）／HEAD 无锁旧实现 | 4 个变异体全杀，原样对照 PASS。"`acquire` 恒 False"这条死得更早：digest 每轮都跳过，连库都建不出来，夹具构建那一步就断言失败 —— 报的是"建索引失败：库不存在"，也算杀，但理由不是锁的互斥断言 |
-| `staging-atomic-write` | 直接写正式名（非原子）／提前占位（先建空的正式名）／HEAD `open(path,'x')` | 3 个变异体全杀，原样对照 PASS |
-| `ps-install-guard` | 删掉"无 python 就停手"守卫 | 杀（"无 python 仍写出了 hooks.json"） |
+| `digest-concurrent` | 锁永不生效（`acquire` 直接 True）／锁永不释放（`release` no-op）／永不抢占（`acquire` 直接 False）／`36bd4bf` 无锁旧实现 | 4 个变异体全杀，原样对照 PASS。"`acquire` 恒 False"这条死得更早：digest 每轮都跳过，连库都建不出来，夹具构建那一步就断言失败 —— 报的是"建索引失败：库不存在"，也算杀，但理由不是锁的互斥断言 |
+| `staging-atomic-write` | 直接写正式名（非原子）／提前占位（先建空的正式名）／`36bd4bf` 的 `open(path,'x')` | 3 个变异体全杀，原样对照 PASS |
+| `ps-install-guard` | 删掉"无 python 就停手"守卫／守卫退回只看"有没有 python"（FIX-032） | 2 个变异体全杀：前者被"找不到 python"场景杀，后者只在"版本 3.9"场景被杀 |
 | `ps-no-output-guard` | 退回 `[version]$E["python"]` | 杀（"那一行整个消失了"） |
 | `ps-dataroot-guard` | 数据根不匹配退回 `Warn`（修复前行为） | 杀（无 `[FAIL]` 且退出码 0） |
 | `ps-project-default` | `-Project` 默认退回 `"."` | 杀（在无 `.codex` 的目录报假 `[FAIL]`） |
 | `ps-doctor-subdirs` | 子目录列表里去掉 `staging` | 杀（"体检里没有'子目录 staging'这一项"） |
-| `ps-hook-path-check` | 删掉 hook 路径检查段／HEAD 旧 `doctor.ps1` | 2 个变异体全杀 |
+| `ps-hook-path-check` | 删掉 hook 路径检查段／`36bd4bf` 旧 `doctor.ps1` | 2 个变异体全杀 |
 | `timeline-max-date` | `MAX(date)` 退回裸列 `date` | 杀（跨天会话排到 09-22） |
 
 两个"用例自己是空转"的实例（都是第四轮抓出来的，产品代码没问题；`regression_test.py` 本轮才进仓库，
 所谓"第一版"只在工作过程中出现过，仓库历史里查不到 —— 这里如实记下，不当作可回溯的凭证）：
 
 1. `staging-atomic-write` 第一版只查"有没有 `.part-*` 残留、成品能不能解析"—— 任何单线程写都满足，
-   把 `open(path,"w")` 直接写正式名（非原子）照样通过，HEAD 也通过。重写为**把写侧的序列化注入延迟**
+   把 `open(path,"w")` 直接写正式名（非原子）照样通过，`36bd4bf` 的旧实现也通过。重写为**把写侧的序列化注入延迟**
    （`json.dump` 分 6 段写 + flush + sleep，窗口从 <1ms 放大到百毫秒级），再让读者线程高频调用**真实的**
    `staging_merge.load_proposals()`，断言读者永远看不到半写提案；注入点失效（写侧若改用 `json.dumps`）时
    用例直接判 FAIL，不许悄悄退回空转。
 2. `digest-concurrent` 第一版那段"并发锤击"每轮实际是 `written=0 skipped=6` 的空转（见该用例 docstring）。
    旧代码的并发损坏在这台机器上复现率不稳定（两轮独立验证都没能在旧代码上跑出损坏），所以改成直接构造
    **锁的状态**、断言互斥契约本身（锁被持有 -> 跳过且零写入；锁陈旧 -> 抢占并继续）—— 旧代码没有锁，
-   第一条必然过不了（已用 HEAD 变异体验证）。
+   第一条必然过不了（已用 `36bd4bf` 旧实现变异体验证）。
 3. `ps-no-output-guard` 的夹具**第一版造错了触发条件**：我按 FIX-025 原文的"`[version]$null` 会抛异常"
    只让桩 python 什么都不输出（键缺失 -> `$E["python"]` 是 `$null`），结果变异体**没被杀掉**。实测
    PowerShell 语义：`[version]$null` 返回 `$null`（不抛），抛的是**空串** `[version]""`。夹具改成只打印

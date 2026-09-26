@@ -21,8 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "env var points elsewhere" check - stays hand-checked). Zero third-party dependencies, self-built and
   self-cleaning temp directories, never touches the real data root. Exit codes: `0` all PASS / `1` any FAIL /
   `2` SKIP only (environment lacks something, e.g. no `pwsh`). Mutation testing is **not** part of the suite:
-  the fixes that have a case were reverted one by one in a throwaway copy of the tree (15 mutants, including
-  four reverts to the pre-fix code) and the matching case had to fail - that is how two cases were caught being
+  the fixes that have a case were reverted one by one in a throwaway copy of the tree (16 mutants, including
+  four reverts to the pre-fix commit `36bd4bf` - pinned by hash, because `HEAD` becomes the *fixed* code the
+  moment the batch is committed and the whole-file mutants then revert nothing) and the matching case had to
+  fail - that is how two cases were caught being
   vacuous in their first version (store bloat, staging atomicity; mutants and results are recorded in FIXES.md,
   rows without a case keep their hand-written recipe).
 
@@ -90,7 +92,10 @@ Every item below was reproduced on a clean copy before being fixed.
   proposals are reported instead of skipped, upserts fall back to append with a marker and a warning, and
   proposal writes go through `.part-*` + `os.replace`.
 - **Installer and `doctor.ps1` (6 issues).** No usable Python no longer writes a `hooks.json` that points at an
-  empty interpreter (hook failures are silent); an unparsable Python version no longer deletes a health-check row
+  empty interpreter - where "usable" now means 3.10 or newer: the guard used to ask only whether *some* `python`
+  existed, so a 3.9 interpreter was still written into the config and the hook failed silently at run time
+  (FIX-032; the Claude-side installer already checked the version, the two were asymmetric). An
+  unparsable Python version no longer deletes a health-check row
   (the cast `[version]""` threw, so the row vanished and only a red error remained); a non-default `-DataRoot` now
   either persists `VARVE_DATA` or fails loudly instead of letting every script look in `~/.varve`; new
   `-NoSetEnv` switch; `doctor.ps1 -Project` no longer defaults to `.` (which reported a false `[FAIL]` for

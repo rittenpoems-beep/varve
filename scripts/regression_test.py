@@ -701,9 +701,15 @@ def c_ps_syntax():
     return True, "5 个脚本解析通过"
 
 
-@check("ps-install-guard", "FIX-025")
+@check("ps-install-guard", "FIX-025/032")
 def c_ps_install_guard():
-    """没找到 python 时 install.ps1 必须停手：退出码 1，且**不写** hooks.json。"""
+    """python 不可用时 install.ps1 必须停手：退出码非 0，且**不写** hooks.json。
+
+    两种"不可用"都要拦：① 压根找不到 python（FIX-025①）② 找得到但版本不够（FIX-032：
+    原判据只看"有没有 python"，3.9 这种解释器照样被写进 hooks.json —— 当场只有一行
+    [FAIL]，hook 要等运行时才静默失败）。第二种用只打印 `python=3.9.0` 的桩顶掉真 python
+    （取版本走的就是 check-env.py 输出里的 `python=` 那一行）。
+    """
     pwsh = shutil.which("pwsh")
     if not pwsh:
         return "skip", "未找到 pwsh"
@@ -711,19 +717,34 @@ def c_ps_install_guard():
     if os.path.exists(tmp):
         shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp)
-    fake_home = os.path.join(tmp, "home")
-    os.makedirs(fake_home)
-    cmd = ("$env:PATH='C:\\nope'; $env:USERPROFILE='" + fake_home + "'; "
-           "& '" + os.path.join(HERE, "install.ps1").replace("\\", "/") + "' -DataRoot '"
-           + os.path.join(tmp, "data").replace("\\", "/") + "' -NoSetEnv *>$null; exit $LASTEXITCODE")
-    r = subprocess.run([pwsh, "-NoProfile", "-Command", cmd], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
-    hooks = os.path.join(fake_home, ".codex", "hooks.json")
-    if r.returncode == 0:
-        return False, "退出码应为 1，实得 0"
-    if os.path.exists(hooks):
-        return False, "无 python 仍写出了 hooks.json（会配出一个跑不起来的 hook）"
-    return True, "退出码 1 且未写 hooks.json"
+    out = []
+
+    def run(label, stub):
+        d = os.path.join(tmp, label)
+        home = os.path.join(d, "home")
+        os.makedirs(home)
+        path = "'C:\\nope'"                      # ① 连 python 都找不到
+        if stub:                                # ② 找得到，但只报 3.9.0
+            fakebin = os.path.join(d, "bin")
+            os.makedirs(fakebin)
+            with open(os.path.join(fakebin, "python.cmd"), "w", encoding="ascii",
+                      newline="\r\n") as fh:
+                fh.write(stub)
+            path = "'" + fakebin.replace("\\", "/") + ";' + $env:PATH"
+        cmd = ("$env:PATH=" + path + "; $env:USERPROFILE='" + home.replace("\\", "/") + "'; "
+               "& '" + os.path.join(HERE, "install.ps1").replace("\\", "/") + "' -DataRoot '"
+               + os.path.join(d, "data").replace("\\", "/") + "' -NoSetEnv *>$null; "
+               "exit $LASTEXITCODE")
+        r = subprocess.run([pwsh, "-NoProfile", "-Command", cmd], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        if r.returncode == 0:
+            out.append(label + "：退出码应为非 0，实得 0")
+        if os.path.exists(os.path.join(home, ".codex", "hooks.json")):
+            out.append(label + "：python 不可用仍写出了 hooks.json（会配出一个跑不起来的 hook）")
+
+    run("找不到 python", None)
+    run("版本 3.9", "@echo off\r\necho python=3.9.0\r\nexit /b 0\r\n")
+    return (not out), "; ".join(out) or "两种不可用（找不到 / 版本过低）都中止且未写 hooks.json"
 
 
 @check("ps-dataroot-guard", "FIX-025")
