@@ -1247,6 +1247,76 @@ def c_digest_full_compact():
                                         % (r1, filesz() / float((pc - fl) * ps), fl))
 
 
+# ---------- FIX-033 records 漏斗多词变体 ----------
+
+@check("records-multiword", "FIX-033")
+def c_records_multiword():
+    """多词变体在 records 漏斗要按**词** OR 匹配，与检索主路径同语义（FIX-033）。
+
+    夹具的关键是**词在记录行里不相邻**：行写成"并发场景下的写入丢更新"，变体给
+    "并发 写入"。旧实现把整个变体当字面串去 `in`，永远漏；而同一变体在 run_variant
+    里会被拆成词、字面兜底路能命中 —— 于是漏斗第一级**静默**空转，用户只看到
+    "records 没命中"（2026-10-16 实测复现：整串字面匹配返回 []，拆词返回命中）。
+    """
+    root, data, _db = build_store("recmw", [
+        ("rollout-2026-09-20T01-00-00-00000000-0000-0000-0000-000000000000.jsonl", "s1",
+         [("占位提问 abcdef", "占位回答")])])
+    rdir = os.path.join(data, "records")
+    os.makedirs(rdir, exist_ok=True)
+    with open(os.path.join(rdir, "x.md"), "w", encoding="utf-8") as fh:
+        fh.write("### 2026-09-20\n- 并发场景下的写入丢更新已修\n")
+    r = run_py("recall.py", "--data", data, "并发 写入")
+    if r.returncode != 0:
+        return False, "recall 退出码非 0：" + (r.stderr or "")[-200:]
+    if "【粗记录】" not in (r.stdout or ""):
+        return False, "多词变体没进 records 漏斗（【粗记录】缺失）：" \
+            + (r.stdout or "")[:200].replace("\n", " | ")
+    if "写入丢更新" not in (r.stdout or ""):
+        return False, "records 命中行没展示：" + (r.stdout or "")[:200].replace("\n", " | ")
+    return True, "多词变体按词 OR 命中 records（词不相邻也能捞到）"
+
+
+# ---------- FIX-034 注入截断按行边界 ----------
+
+@check("status-trunc-line", "FIX-034")
+def c_status_trunc_line():
+    """超 LIMIT 的快照截断必须落在**行边界**（FIX-034）。
+
+    旧实现按字符硬切 `seg[:LIMIT]`：2026-10-16 实测末行只剩 'li' 两个字符就被注入
+    进模型上下文。半行 markdown 既是噪声，也可能把表格 / 围栏切成"开着"的形态。
+    走 hook 全链路（pending -> UserPromptSubmit 注入）而不是直接调库函数，
+    断言注入体里每个以 'line ' 开头的行都是**完整**的原始行。
+    """
+    root = new_root("trunc")
+    lines = ["line %03d padding padding padding" % i for i in range(300)]
+    with open(os.path.join(root, "STATUS.md"), "w", encoding="utf-8") as fh:
+        fh.write("<!-- ===== 快照 ===== -->\n" + "\n".join(lines) + "\n")
+    sid = "s-trunc"
+    pdir = os.path.join(root, "pending")
+    os.makedirs(pdir, exist_ok=True)
+    with open(os.path.join(pdir, sid + ".json"), "w", encoding="utf-8") as fh:
+        json.dump({"session_id": sid, "cwd": root, "source": "startup", "ts": 0}, fh)
+    env = dict(os.environ, VARVE_DATA=root)
+    r = subprocess.run([PY, "-X", "utf8", os.path.join(HERE, "hook-user-prompt.py")],
+                       input=json.dumps({"session_id": sid, "prompt": "继续"}),
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", env=env)
+    out = r.stdout or ""
+    if "全局工程状态" not in out:
+        return False, "hook 没注入状态卡：" + out[:200].replace("\n", " | ") + (r.stderr or "")[:200]
+    body = out.split("【记忆系统", 1)[1]
+    # 残缺行 = 某条原始行的**真前缀**（硬切会把末行切成 'li' 这种碎片；它不以
+    # 'line ' 之外的特征开头，只能靠前缀关系抓）。完整行 o.startswith(o) 但 o != o
+    # 为假，不会被误报。
+    frag = [b for b in (x.strip() for x in body.splitlines())
+            if b and any(o.startswith(b) and o != b for o in lines)]
+    if frag:
+        return False, "截断切出残缺行：%s" % frag[:3]
+    if "已按行截断" not in body:
+        return False, "截断提示没说明按行截断：" + body[-120:].replace("\n", " | ")
+    return True, "超 LIMIT 快照按行边界截断，注入体无残缺行"
+
+
 # ---------- 主流程 ----------
 
 def main():

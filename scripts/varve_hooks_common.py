@@ -118,6 +118,17 @@ def extract_latest_snapshot(text):
     return text[marks[-1] + len(SNAPSHOT_MARK):].strip()
 
 
+def _cut_at_line(text, limit):
+    """截到 limit 以内且落在**行边界**：切在行中间会把半行 markdown 注入进上下文
+    （2026-10-16 实测旧实现末行只剩 'li' 两字符），半行表格 / 半开围栏都是噪声。
+    找不到行边界（单行就超 limit）才退回硬切。
+    """
+    if len(text) <= limit:
+        return text
+    cut = text.rfind("\n", 0, limit)
+    return text[:cut] if cut > 0 else text[:limit]
+
+
 def render_status(cwd):
     """读全局卡：优先取**最后一条快照**；旧格式（整区）降级兼容。"""
     status = find_status(cwd)
@@ -132,7 +143,7 @@ def render_status(cwd):
     if seg:
         head = "【记忆系统 · 全局工程状态 · 最新快照（追加注入）】"
         if len(seg) > LIMIT:
-            seg = seg[:LIMIT] + "\n...(单条快照 > " + str(LIMIT) + " 字符，已截断；请精简当前状态)"
+            seg = _cut_at_line(seg, LIMIT) + "\n...(单条快照 > " + str(LIMIT) + " 字符，已按行截断；请精简当前状态)"
     else:
         m = SECTION_RE.search(text)
         if not m:
@@ -140,7 +151,7 @@ def render_status(cwd):
         seg = m.group(0)
         head = "【记忆系统 · 全局工程状态（追加注入）】"
         if len(seg) > LIMIT:
-            seg = seg[:LIMIT] + "\n...(已截断)"
+            seg = _cut_at_line(seg, LIMIT) + "\n...(已按行截断)"
     return head + "\n\n" + seg + "\n"
 
 

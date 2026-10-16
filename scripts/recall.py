@@ -84,9 +84,17 @@ def connect_db(db):
 # ---------- 粗记录（records 漏斗第一级）----------
 
 def scan_records(data_root, terms, limit=6):
+    """records 漏斗第一级：按**词** OR 匹配（与检索主路径同语义）。
+
+    旧实现把每个变体**整串**当字面串去 `in`：变体含空格时（"并发 写入"）要求记录行
+    里字面连续出现该串，而同一变体在 run_variant 里会被拆成词、字面兜底路能命中 ——
+    漏斗第一级于是**静默**空转，用户只看到"records 没命中"（2026-10-16 实测：
+    整串匹配返回 []，拆词返回命中）。拆词后与 fts_quote 的"拆词 + OR"哲学一致。
+    """
+    words = [w for t in terms for w in t.split()]
     hits = []
     rdir = os.path.join(data_root, "records")
-    if not os.path.isdir(rdir):
+    if not os.path.isdir(rdir) or not words:
         return hits
     for fn in sorted(os.listdir(rdir)):
         if not fn.endswith(".md"):
@@ -97,7 +105,7 @@ def scan_records(data_root, terms, limit=6):
                     s = line.strip()
                     if not s or s.startswith("<!--"):
                         continue
-                    if any(t in s for t in terms):
+                    if any(w in s for w in words):
                         hits.append((fn, ln, s[:150]))
                         if len(hits) >= limit:
                             return hits
