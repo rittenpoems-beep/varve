@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  regression:
+    name: regression suite
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run regression suite
+        shell: bash
+        run: |
+          rc=0
+          python -X utf8 scripts/regression_test.py || rc=$?
+          if [ "$rc" -eq 2 ]; then
+            echo "::notice::regression suite passed with SKIP-only cases (environment lacks pwsh etc.)"
+            rc=0
+          fi
+          exit "$rc"
