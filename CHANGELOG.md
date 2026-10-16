@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.1] - 2026-10-16
 
 ### Added
 
@@ -27,6 +27,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fail - that is how two cases were caught being
   vacuous in their first version (store bloat, staging atomicity; mutants and results are recorded in FIXES.md,
   rows without a case keep their hand-written recipe).
+- **CI on GitHub Actions** (`.github/workflows/ci.yml`): the regression suite now runs on every push and
+  pull request on `windows-latest` - the supported platform, since the PowerShell cases need `pwsh` and
+  Windows path semantics. A SKIP-only exit code `2` is surfaced as a notice instead of a failure.
+
+### Fixed (self-review batch, 2026-10-16)
+
+- **`recall.py` records funnel ignored multi-word variants (FIX-033).** `scan_records` matched each query
+  variant as one literal substring, so `recall.py "并发 写入"` could never hit a record line where the two
+  words are not adjacent - while the same variant *was* split into words on the FTS / literal-fallback path.
+  The first funnel stage silently returned nothing. Variants are now split into words and matched with OR
+  semantics, consistent with `fts_quote`.
+- **Injected status snapshots were truncated mid-line (FIX-034).** Over-`LIMIT` snapshots were cut at
+  `seg[:LIMIT]`, injecting a half line (measured: a two-character fragment) into model context, which can
+  also leave a markdown table or fence "open". Truncation now falls back to the last line boundary within
+  the limit, and the truncation notice says so.
 
 ### Fixed (external review batch, 2026-09-26)
 

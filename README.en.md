@@ -1,6 +1,7 @@
 # Varve
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![ci](https://github.com/rittenpoems-beep/varve/actions/workflows/ci.yml/badge.svg)](https://github.com/rittenpoems-beep/varve/actions/workflows/ci.yml)
 
 **English** | [简体中文](README.md)
 
@@ -10,7 +11,7 @@ Zero LLM calls. Zero third-party dependencies (Python standard library + PowerSh
 
 > The name comes from geology: a **varve** is an annual sediment layer in a glacial lake — one layer per year, stacked, never rewritten, traceable back to any layer. That is exactly its three principles: **append-only, rebuildable, addressable**.
 
-> Status: early but usable (v0.2). In daily use on a real project; the index layer ships with an audit tool (`audit.py`) and an **executable** regression suite (`scripts/regression_test.py`; the ledger is [FIXES.md](FIXES.md), in Chinese).
+> Status: early but usable (v0.2.1). In daily use on a real project; the index layer ships with an audit tool (`audit.py`) and an **executable** regression suite (`scripts/regression_test.py`; the ledger is [FIXES.md](FIXES.md), in Chinese), and the suite runs in CI on every push / PR (badge above).
 
 ## Contents
 

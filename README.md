@@ -1,6 +1,7 @@
 # Varve
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![ci](https://github.com/rittenpoems-beep/varve/actions/workflows/ci.yml/badge.svg)](https://github.com/rittenpoems-beep/varve/actions/workflows/ci.yml)
 
 [English](README.en.md) | **简体中文**
 
@@ -10,7 +11,7 @@
 
 > 名字来自地质学：**varve**（纹泥）是冰川湖底的年层沉积——一层记录一年，层层叠加、永不重写、可回溯到任意一层。这正是它的三条原则：**只追加、可重建、可定位**。
 
-> 状态：早期可用（v0.2）。已在真实项目上连续使用，索引层带审计（`audit.py`）与**可执行**的回归用例（`scripts/regression_test.py`，清单见 [FIXES.md](FIXES.md)）。
+> 状态：早期可用（v0.2.1）。已在真实项目上连续使用，索引层带审计（`audit.py`）与**可执行**的回归用例（`scripts/regression_test.py`，清单见 [FIXES.md](FIXES.md)），回归套件由 CI 在每次 push / PR 上跑（见顶部徽章）。
 
 ## 目录
 
